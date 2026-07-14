@@ -73,6 +73,7 @@ export default function Home() {
   const [aiHistory, setAiHistory] = useState<LocalAIMessage[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
+  const [draggedQuestionId, setDraggedQuestionId] = useState("");
   const [query, setQuery] = useState("");
   const [newBook, setNewBook] = useState("");
   const [draft, setDraft] = useState({ stem: "", answer: "", explanation: "", type: "" });
@@ -192,6 +193,18 @@ export default function Home() {
     notify("错题已删除");
   }
 
+  function reorderQuestion(targetId: string) {
+    if (!active || !draggedQuestionId || draggedQuestionId === targetId) return;
+    const from = active.questions.findIndex((question) => question.id === draggedQuestionId);
+    const to = active.questions.findIndex((question) => question.id === targetId);
+    if (from < 0 || to < 0) return;
+    const questions = [...active.questions];
+    const [moved] = questions.splice(from, 1);
+    questions.splice(to, 0, moved);
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions } : book));
+    setDraggedQuestionId("");
+  }
+
   function generatePractice() {
     const templates = generated[selected?.type || ""] || generated.default;
     const practices = templates.map((template) => ({ ...template, id: uid(), type: selected?.type || "综合", createdAt: "刚刚", mastered: false }));
@@ -297,7 +310,7 @@ export default function Home() {
             {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮</div><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy || aiAnswer ? <div className="ai-answer" aria-live="polite">{aiBusy ? "正在本机生成回答…" : aiAnswer}</div> : null}</> : null}
           </section>
 
-          {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>从错误中提炼方法</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""}`} key={question.id} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">›</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2>{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
+          {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>长按或拖动题目可调整顺序</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""} ${question.id === draggedQuestionId ? "dragging" : ""}`} key={question.id} draggable onDragStart={() => setDraggedQuestionId(question.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => reorderQuestion(question.id)} onDragEnd={() => setDraggedQuestionId("")} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">⠿</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2>{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
           {view === "review" && selected && <div className="question-tools"><button onClick={deleteQuestion}>删除当前错题</button></div>}
           {view === "review" && selected && <section className="practice-banner"><div className="practice-shape">✦</div><div><p className="eyebrow">举一反三</p><h2>真的掌握了吗？</h2><p>用三道相似但不重复的题，检验你是否掌握了解题方法。</p></div><button className="primary" onClick={generatePractice}>生成 3 道练习题 <span>→</span></button></section>}
         </div>
