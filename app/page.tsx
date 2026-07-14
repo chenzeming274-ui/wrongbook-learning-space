@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { askLocalAI, loadLocalAI } from "../src/local-ai";
 
 type WrongQuestion = {
   id: string;
@@ -64,6 +65,13 @@ export default function Home() {
   const [answerInput, setAnswerInput] = useState("");
   const [answerSubmitted, setAnswerSubmitted] = useState(false);
   const [answerCorrect, setAnswerCorrect] = useState(false);
+  const [aiProgress, setAiProgress] = useState(0);
+  const [aiReady, setAiReady] = useState(false);
+  const [aiQuery, setAiQuery] = useState("");
+  const [aiLoadError, setAiLoadError] = useState("");
+  const [aiAnswer, setAiAnswer] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
   const [query, setQuery] = useState("");
   const [newBook, setNewBook] = useState("");
   const [draft, setDraft] = useState({ stem: "", answer: "", explanation: "", type: "" });
@@ -84,11 +92,52 @@ export default function Home() {
 
   useEffect(() => { setShowAnswer(false); setAnswerSubmitted(false); setAnswerInput(""); setAnswerCorrect(false); }, [selectedId]);
 
+  useEffect(() => {
+    let active = true;
+
+    loadLocalAI((report) => {
+      if (!active) return;
+      setAiProgress(Math.max(0, Math.min(100, Math.round(report.progress * 100))));
+    })
+      .then(() => {
+        if (!active) return;
+        setAiProgress(100);
+        setAiReady(true);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        const message = error instanceof Error ? error.message : "模型加载失败，请重试。";
+        setAiLoadError(message.includes("WebGPU") ? message : "模型加载失败。请检查网络和设备空间后重试。");
+      });
+
+    return () => { active = false; };
+  }, [aiRetryAttempt]);
+
   const active = notebooks.find((book) => book.id === activeId) ?? notebooks[0];
   const selected = active?.questions.find((question) => question.id === selectedId) ?? active?.questions[0];
   const filtered = useMemo(() => active?.questions.filter((q) => q.stem.includes(query) || q.type.includes(query)) ?? [], [active, query]);
 
   function notify(message: string) { setToast(message); window.setTimeout(() => setToast(""), 2200); }
+
+  function retryAiLoad() {
+    setAiReady(false);
+    setAiLoadError("");
+    setAiProgress(0);
+    setAiRetryAttempt((value) => value + 1);
+  }
+
+  async function runAiSearch() {
+    if (!aiReady || !aiQuery.trim() || aiBusy) return;
+    setAiBusy(true);
+    setAiAnswer("");
+    try {
+      setAiAnswer(await askLocalAI(aiQuery.trim()));
+    } catch (error) {
+      setAiAnswer(error instanceof Error ? error.message : "回答生成失败，请稍后重试。");
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   function createNotebook() {
     if (!newBook.trim()) return;
@@ -230,7 +279,13 @@ export default function Home() {
         <header className="topbar"><div className="breadcrumb">我的题库 <span>/</span> <strong>{active?.name || "未命名题库"}</strong></div><div className="top-actions"><label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索错题或知识点" /><kbd>⌘ K</kbd></label><button className="icon-button" aria-label="通知">♧</button><button className="avatar">学</button></div></header>
         <div className="content">
           <div className="page-heading"><div><p className="eyebrow">学习进度 <span>·</span> {active?.name}</p><h1>把错题变成<br /><i>下一次的得分。</i></h1><p className="subheading">理解错误、掌握方法，再用三道新题确认真的学会。</p></div><div className="progress-card"><div className="ring"><span>{active?.questions.filter((q) => q.mastered).length || 0}</span><small>/ {active?.questions.length || 0}</small></div><div><strong>掌握进度</strong><span>继续保持，慢慢变强</span></div></div></div>
-          <div className="tabs"><button className={view === "review" ? "tab active" : "tab"} onClick={() => setView("review")}>错题复盘 <span>{active?.questions.length || 0}</span></button><button className={view === "add" ? "tab active" : "tab"} onClick={() => setView("add")}>＋ 录入错题</button></div>
+          <div className="tabs"><button className={view === "review" ? "tab active" : "tab"} onClick={() => setView("review")}>错题复盘 <span>{active?.questions.length || 0}</span></button><button className={view === "add" ? "tab active" : "tab"} onClick={() => setView("add")}>＋ 录入错题</button><button className={`ai-tab ${aiReady ? "ready" : ""}`} disabled={!aiReady} onClick={() => document.getElementById("ai-search")?.focus()}>✦ AI 搜索</button></div>
+          <section className={`ai-search-card ${aiReady ? "ready" : aiLoadError ? "error" : "loading"}`}>
+            <div className="ai-search-head"><div><span className="ai-kicker">本机轻量 AI</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : "正在准备 AI 模型"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : `${aiProgress}%`}</span></div>
+            <div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>
+            {aiLoadError ? <div className="ai-error" role="alert"><span>{aiLoadError}</span><button onClick={retryAiLoad}>重新加载</button></div> : null}
+            {aiReady ? <><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy || aiAnswer ? <div className="ai-answer" aria-live="polite">{aiBusy ? "正在本机生成回答…" : aiAnswer}</div> : null}</> : null}
+          </section>
 
           {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>从错误中提炼方法</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""}`} key={question.id} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">›</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2>{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
           {view === "review" && selected && <div className="question-tools"><button onClick={deleteQuestion}>删除当前错题</button></div>}
