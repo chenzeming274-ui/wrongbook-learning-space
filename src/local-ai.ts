@@ -7,6 +7,7 @@ import {
 export const LOCAL_AI_MODEL = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 
 type ProgressListener = (report: InitProgressReport) => void;
+export type LocalAIMessage = { role: "user" | "assistant"; content: string };
 
 let engine: MLCEngineInterface | null = null;
 let enginePromise: Promise<MLCEngineInterface> | null = null;
@@ -53,7 +54,7 @@ export async function loadLocalAI(onProgress?: ProgressListener) {
   }
 }
 
-export async function askLocalAI(question: string) {
+export async function askLocalAI(question: string, history: LocalAIMessage[] = []) {
   const localEngine = await loadLocalAI();
   const response = await localEngine.chat.completions.create({
     messages: [
@@ -62,6 +63,7 @@ export async function askLocalAI(question: string) {
         content:
           "你是一个耐心、简洁的中文学习助手。请直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。无法确定时要明确说明，不要编造。",
       },
+      ...history,
       { role: "user", content: question },
     ],
     temperature: 0.25,
