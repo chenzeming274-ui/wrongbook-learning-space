@@ -113,7 +113,7 @@ export default function Home() {
       .catch((error: unknown) => {
         if (!active) return;
         const message = error instanceof Error ? error.message : "模型加载失败，请重试。";
-        setAiLoadError(message.includes("WebGPU") ? message : "模型加载失败。请检查网络和设备空间后重试。");
+        setAiLoadError(message.includes("WebGPU") ? message : `模型加载失败：${message.slice(0, 90)}`);
       });
 
     return () => { active = false; };

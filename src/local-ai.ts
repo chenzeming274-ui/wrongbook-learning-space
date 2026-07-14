@@ -10,7 +10,7 @@ const WasmFromCDN = {
 export const LOCAL_AI_MODEL =
   "DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf";
 const LOCAL_AI_MODEL_URL =
-  "https://huggingface.co/second-state/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf";
+  "https://hf-mirror.com/second-state/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf";
 
 export type InitProgressReport = { progress: number; text: string };
 type ProgressListener = (report: InitProgressReport) => void;
