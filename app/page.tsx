@@ -61,6 +61,9 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState("q-1");
   const [view, setView] = useState<"review" | "add">("review");
   const [showAnswer, setShowAnswer] = useState(false);
+  const [answerInput, setAnswerInput] = useState("");
+  const [answerSubmitted, setAnswerSubmitted] = useState(false);
+  const [answerCorrect, setAnswerCorrect] = useState(false);
   const [query, setQuery] = useState("");
   const [newBook, setNewBook] = useState("");
   const [draft, setDraft] = useState({ stem: "", answer: "", explanation: "", type: "" });
@@ -79,7 +82,7 @@ export default function Home() {
     if (loaded) localStorage.setItem("wrongbook-data", JSON.stringify(notebooks));
   }, [loaded, notebooks]);
 
-  useEffect(() => { setShowAnswer(false); }, [selectedId]);
+  useEffect(() => { setShowAnswer(false); setAnswerSubmitted(false); setAnswerInput(""); setAnswerCorrect(false); }, [selectedId]);
 
   const active = notebooks.find((book) => book.id === activeId) ?? notebooks[0];
   const selected = active?.questions.find((question) => question.id === selectedId) ?? active?.questions[0];
@@ -137,6 +140,33 @@ export default function Home() {
     setSelectedId(practices[0].id); setShowAnswer(false); notify("已生成 3 道同类练习题");
   }
 
+  function generateOnePractice() {
+    const templates = generated[selected?.type || ""] || generated.default;
+    const template = templates[Math.floor(Math.random() * templates.length)];
+    const practice = { ...template, id: uid(), type: selected?.type || "综合", createdAt: "刚刚", mastered: false };
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [practice, ...book.questions] } : book));
+    notify("答错了，已追加一道同类题");
+  }
+
+  function submitAnswer() {
+    if (!selected || !answerInput.trim()) { notify("请先输入答案"); return; }
+    const normalize = (value: string) => value.trim().replace(/\s+/g, "").toLowerCase();
+    const correct = normalize(answerInput) === normalize(selected.answer);
+    setAnswerCorrect(correct); setAnswerSubmitted(true); setShowAnswer(true);
+    if (correct) notify("回答正确，可以标记为已掌握");
+    else generateOnePractice();
+  }
+
+  function markMasteredAndMaybeDelete() {
+    if (!selected) return;
+    if (window.confirm("答对了。要删除这道错题吗？点击“取消”则移入已掌握。")) {
+      deleteQuestion();
+      return;
+    }
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === selected.id ? { ...q, mastered: true } : q) } : book));
+    notify("已移入已掌握");
+  }
+
   function toggleMastered() {
     if (!selected) return;
     setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === selected.id ? { ...q, mastered: !q.mastered } : q) } : book));
@@ -160,6 +190,12 @@ export default function Home() {
     setSelectedId("q-1");
     setShowAnswer(false);
     notify("已恢复初始数据");
+  }
+
+  function renderAnswerPanel() {
+    if (!selected) return null;
+    if (!answerSubmitted) return <div className="answer-block"><div className="answer-head"><span>先写下你的答案</span><span>提交后揭晓</span></div><div className="answer-entry"><input value={answerInput} onChange={(e) => setAnswerInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitAnswer()} placeholder="输入你的答案…" /><button onClick={submitAnswer}>提交答案</button></div></div>;
+    return <><div className="answer-block"><div className="answer-head"><span>正确答案</span><span className={answerCorrect ? "result-correct" : "result-wrong"}>{answerCorrect ? "回答正确" : "回答错误"}</span></div><div className="answer-value">{selected.answer || "尚未填写答案"}</div></div><div className="explanation"><div className="explain-icon">✦</div><div><span>解析与方法</span><p>{selected.explanation || "尚未填写解析。"}</p></div></div><div className="detail-actions">{answerCorrect ? <button className="master-button" onClick={markMasteredAndMaybeDelete}>删除或移入已掌握</button> : <button className="generate-button" onClick={generateOnePractice}><span>✦</span> 再生成 1 道同类题</button>}</div></>;
   }
 
   return (
@@ -196,7 +232,7 @@ export default function Home() {
           <div className="page-heading"><div><p className="eyebrow">学习进度 <span>·</span> {active?.name}</p><h1>把错题变成<br /><i>下一次的得分。</i></h1><p className="subheading">理解错误、掌握方法，再用三道新题确认真的学会。</p></div><div className="progress-card"><div className="ring"><span>{active?.questions.filter((q) => q.mastered).length || 0}</span><small>/ {active?.questions.length || 0}</small></div><div><strong>掌握进度</strong><span>继续保持，慢慢变强</span></div></div></div>
           <div className="tabs"><button className={view === "review" ? "tab active" : "tab"} onClick={() => setView("review")}>错题复盘 <span>{active?.questions.length || 0}</span></button><button className={view === "add" ? "tab active" : "tab"} onClick={() => setView("add")}>＋ 录入错题</button></div>
 
-          {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>从错误中提炼方法</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""}`} key={question.id} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">›</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2><div className="answer-block"><div className="answer-head"><span>正确答案</span><button onClick={() => setShowAnswer(!showAnswer)}>{showAnswer ? "收起答案" : "显示答案"} <span>{showAnswer ? "⌃" : "⌄"}</span></button></div>{showAnswer && <div className="answer-value">{selected.answer || "还未填写答案"}</div>}</div><div className="explanation"><div className="explain-icon">✦</div><div><span>解析与方法</span><p>{selected.explanation || "补充解析后，这里会显示你自己的解题思路。"}</p></div></div><div className="detail-actions"><button className="master-button" onClick={toggleMastered}>{selected.mastered ? "标记为待复盘" : "✓ 我已经掌握"}</button><button className="generate-button" onClick={generatePractice}><span>✦</span> 再生成 3 道同类题</button></div></> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
+          {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>从错误中提炼方法</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""}`} key={question.id} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">›</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2>{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
           {view === "review" && selected && <div className="question-tools"><button onClick={deleteQuestion}>删除当前错题</button></div>}
           {view === "review" && selected && <section className="practice-banner"><div className="practice-shape">✦</div><div><p className="eyebrow">举一反三</p><h2>真的掌握了吗？</h2><p>用三道相似但不重复的题，检验你是否掌握了解题方法。</p></div><button className="primary" onClick={generatePractice}>生成 3 道练习题 <span>→</span></button></section>}
         </div>
