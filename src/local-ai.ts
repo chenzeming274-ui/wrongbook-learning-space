@@ -1,8 +1,8 @@
 import { CreateMLCEngine, deleteModelAllInfoInCache, type MLCEngine } from "@mlc-ai/web-llm";
 
 /** Browser-native, Chinese-capable high-performance model. Downloads in-page once, then is cached. */
-export const LOCAL_AI_MODEL = "Qwen3-8B";
-const LOCAL_AI_MODEL_ID = "Qwen3-8B-q4f16_1-MLC";
+export const LOCAL_AI_MODEL = "Qwen2.5-1.5B-Instruct";
+const LOCAL_AI_MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
 
 export type InitProgressReport = { progress: number; text: string };
 type ProgressListener = (report: InitProgressReport) => void;
