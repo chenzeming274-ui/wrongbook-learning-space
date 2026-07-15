@@ -92,15 +92,12 @@ function toSuperscript(value: string) {
 
 function formatMathText(value: string) {
   if (!value) return value;
-  let text = sanitizeAIText(value)
+  const text = sanitizeAIText(value)
     .replace(/\\,|\\;|\\:/g, " ")
-    .replace(/\^\{([^{}]+)\}/g, (_, token: string) => `^(${token})`);
-
-  for (let i = 0; i < 2; i += 1) {
-    const next = text.replace(/\(([^()]+)\)/g, "$1");
-    if (next === text) break;
-    text = next;
-  }
+    .replace(/\^\{([^{}]+)\}/g, (_, token: string) => `^(${token})`)
+    .replace(/\bf\s*'\s*x\b/g, "f'(x)")
+    .replace(/\bfx\b/g, "f(x)")
+    .replace(/\bf(\d+(?:\.\d+)?)\b/g, "f($1)");
 
   return toSuperscript(text).replace(/\s+([,，。；;])/g, "$1").trim();
 }

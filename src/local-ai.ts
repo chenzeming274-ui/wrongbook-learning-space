@@ -24,18 +24,34 @@ function broadcastProgress(progress: number, text: string) {
 export function sanitizeAIText(value: string) {
   return value
     .replace(/```[\s\S]*?```/g, (match) => match.replace(/```/g, ""))
+    .replace(/\\\[/g, "\n")
+    .replace(/\\\]/g, "\n")
+    .replace(/\\\(/g, "")
+    .replace(/\\\)/g, "")
     .replace(/\\left\s*/g, "")
     .replace(/\\right\s*/g, "")
     .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "$1/$2")
     .replace(/\\frac\s*([a-zA-Z0-9+\-^.]+)\s*([a-zA-Z0-9+\-^.]+)/g, "$1/$2")
     .replace(/\\sqrt\{([^{}]+)\}/g, "sqrt($1)")
+    .replace(/\\text\{([^{}]+)\}/g, "$1")
     .replace(/\\cdot/g, "·")
     .replace(/\\times/g, "×")
     .replace(/\\div/g, "÷")
+    .replace(/\\(?:geq|ge)/g, "≥")
+    .replace(/\\(?:leq|le)/g, "≤")
+    .replace(/\\neq/g, "≠")
+    .replace(/\\(?:to|rightarrow)/g, "→")
+    .replace(/\\implies/g, "⇒")
     .replace(/\\([a-zA-Z]+)/g, "$1")
     .replace(/\\/g, "")
     .replace(/[{}]/g, "")
-    .replace(/\s+/g, " ")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/\bimplies\b/gi, "⇒")
+    .replace(/\[\s*([^\[\]\n]*=[^\[\]\n]*)\s*\]/g, "$1")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .replace(/\(\s+/g, "(")
     .replace(/\s+\)/g, ")")
     .trim();
@@ -111,7 +127,7 @@ export async function askLocalAI(question: string, history: LocalAIMessage[] = [
   const response = await localEngine.chat.completions.create({
     model: activeModelId,
     messages: [
-      { role: "system", content: "你是错题本中的本地学习助手。不要主动提及底层模型的名称、厂商、参数或技术实现，也不要用模型名称介绍自己。请耐心、简洁地直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。公式必须直接写成普通可读文本，不要输出 LaTeX、反斜杠、花括号、代码块或多层括号；例如把 f'(x)=\\frac{d}{dx}\\left(\\frac{1}{2}x^2-3x+4\\right) 写成 f'(x)=d/dx(1/2x²-3x+4)。如果需要表示分数，直接写 a/b；如果需要表示平方，直接写 x²。无法确定时要明确说明，不要编造。" },
+      { role: "system", content: "你是错题本中的本地学习助手。不要提及模型名称、厂商、参数或技术实现。直接用简洁中文回答，解题时按“思路、步骤、结论”分行书写。必须使用普通文本和 Unicode 数学符号，绝对禁止 LaTeX、Markdown、反斜杠、花括号、公式定界符和代码块。函数必须写成 f(x)、f'(x)、f(1)，乘法写 ×，分数写 1/2，平方写 x²，不得写 fx、f'x、f1，也不得把乘数和变量粘连。区间可写 [1, 5]。示例：f'(x) = d/dx(1/2 × x² - 3x + 4)。输出前自行检查；若含反斜杠、花括号或 LaTeX 命令，必须改写成普通文本后再回答。无法确定时明确说明，不要编造。" },
       ...history,
       { role: "user", content: question },
     ],
