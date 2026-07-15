@@ -1,8 +1,9 @@
 import { CreateMLCEngine, deleteModelAllInfoInCache, type MLCEngine } from "@mlc-ai/web-llm";
 
-/** Browser-native, Chinese-capable high-performance model. Downloads in-page once, then is cached. */
-export const LOCAL_AI_MODEL = "Qwen2.5-1.5B-Instruct";
-const LOCAL_AI_MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+/** Start quickly with the compact model, then prepare the stronger model in the background. */
+export const LOCAL_AI_MODEL = "Qwen2.5-0.5B-Instruct";
+const FAST_MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
+const UPGRADE_MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
 
 export type InitProgressReport = { progress: number; text: string };
 type ProgressListener = (report: InitProgressReport) => void;
@@ -10,6 +11,9 @@ export type LocalAIMessage = { role: "user" | "assistant"; content: string };
 
 let engine: MLCEngine | null = null;
 let enginePromise: Promise<MLCEngine> | null = null;
+let activeModelId = FAST_MODEL_ID;
+let upgradeEngine: MLCEngine | null = null;
+let upgradePromise: Promise<MLCEngine> | null = null;
 const progressListeners = new Set<ProgressListener>();
 
 function broadcastProgress(progress: number, text: string) {
@@ -22,29 +26,19 @@ export function supportsLocalAI() {
 }
 
 export async function loadLocalAI(onProgress?: ProgressListener) {
-  if (!supportsLocalAI()) {
-    throw new Error("此浏览器未开启 WebGPU。请使用最新版 Safari 或 Chrome。");
-  }
-
+  if (!supportsLocalAI()) throw new Error("此浏览器未开启 WebGPU。请使用最新版 Safari 或 Chrome。");
   if (onProgress) progressListeners.add(onProgress);
   try {
     if (engine) return engine;
     if (!enginePromise) {
-      enginePromise = CreateMLCEngine(LOCAL_AI_MODEL_ID, {
-        initProgressCallback: (report) => {
-          broadcastProgress(report.progress, report.text || `正在安装 AI… ${Math.round(report.progress * 100)}%`);
-        },
-      })
-        .then((createdEngine) => {
-          engine = createdEngine;
-          broadcastProgress(1, "AI 已安装，可离线使用");
-          return createdEngine;
-        })
-        .catch((error) => {
-          enginePromise = null;
-          engine = null;
-          throw error;
-        });
+      enginePromise = CreateMLCEngine(FAST_MODEL_ID, {
+        initProgressCallback: (report) => broadcastProgress(report.progress, report.text || `正在安装 AI… ${Math.round(report.progress * 100)}%`),
+      }).then((createdEngine) => {
+        engine = createdEngine;
+        activeModelId = FAST_MODEL_ID;
+        broadcastProgress(1, "AI 已安装，可离线使用");
+        return createdEngine;
+      }).catch((error) => { enginePromise = null; engine = null; throw error; });
     }
     return await enginePromise;
   } finally {
@@ -52,35 +46,59 @@ export async function loadLocalAI(onProgress?: ProgressListener) {
   }
 }
 
-/** Remove only this AI model's downloaded files; learning data is stored separately. */
+/** Downloads and warms up the stronger model without replacing the active conversation. */
+export async function prepareAIUpgrade(onProgress?: ProgressListener) {
+  if (!supportsLocalAI()) throw new Error("此浏览器未开启 WebGPU。");
+  if (upgradeEngine) return upgradeEngine;
+  if (!upgradePromise) {
+    upgradePromise = CreateMLCEngine(UPGRADE_MODEL_ID, {
+      initProgressCallback: (report) => onProgress?.({ progress: report.progress, text: report.text || `正在后台下载升级 AI… ${Math.round(report.progress * 100)}%` }),
+    }).then((createdEngine) => {
+      upgradeEngine = createdEngine;
+      onProgress?.({ progress: 1, text: "升级 AI 已准备完成" });
+      return createdEngine;
+    }).catch((error) => { upgradePromise = null; upgradeEngine = null; throw error; });
+  }
+  return upgradePromise;
+}
+
+/** Switches engines while keeping app-managed chat history intact. */
+export async function upgradeLocalAI() {
+  const prepared = await prepareAIUpgrade();
+  const oldEngine = engine;
+  engine = prepared;
+  enginePromise = Promise.resolve(prepared);
+  activeModelId = UPGRADE_MODEL_ID;
+  upgradeEngine = null;
+  upgradePromise = null;
+  if (oldEngine && oldEngine !== prepared) await oldEngine.unload();
+}
+
+/** Remove only downloaded AI files; learning data and chat records are separate. */
 export async function clearLocalAI() {
-  const activeEngine = engine;
+  const engines = [engine, upgradeEngine].filter((item): item is MLCEngine => Boolean(item));
   engine = null;
   enginePromise = null;
-  if (activeEngine) await activeEngine.unload();
-  await deleteModelAllInfoInCache(LOCAL_AI_MODEL_ID);
+  upgradeEngine = null;
+  upgradePromise = null;
+  activeModelId = FAST_MODEL_ID;
+  await Promise.all(engines.map((item) => item.unload()));
+  await Promise.all([deleteModelAllInfoInCache(FAST_MODEL_ID), deleteModelAllInfoInCache(UPGRADE_MODEL_ID)]);
 }
 
 export async function askLocalAI(question: string, history: LocalAIMessage[] = []) {
   const localEngine = await loadLocalAI();
   const response = await localEngine.chat.completions.create({
-    model: LOCAL_AI_MODEL_ID,
+    model: activeModelId,
     messages: [
-      {
-        role: "system",
-        content:
-          "你是错题本中的本地学习助手。不要主动提及底层模型的名称、厂商、参数或技术实现，也不要用模型名称介绍自己。请耐心、简洁地直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。无法确定时要明确说明，不要编造。",
-      },
+      { role: "system", content: "你是错题本中的本地学习助手。不要主动提及底层模型的名称、厂商、参数或技术实现，也不要用模型名称介绍自己。请耐心、简洁地直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。无法确定时要明确说明，不要编造。" },
       ...history,
       { role: "user", content: question },
     ],
     temperature: 0.25,
     max_tokens: 512,
   });
-
   const content = response.choices[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error("AI 没有生成回答，请换一种问法再试一次。");
-  }
+  if (typeof content !== "string" || !content.trim()) throw new Error("AI 没有生成回答，请换一种问法再试一次。");
   return content.trim();
 }
