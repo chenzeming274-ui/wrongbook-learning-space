@@ -21,6 +21,25 @@ function broadcastProgress(progress: number, text: string) {
   progressListeners.forEach((listener) => listener(report));
 }
 
+export function sanitizeAIText(value: string) {
+  return value
+    .replace(/```[\s\S]*?```/g, (match) => match.replace(/```/g, ""))
+    .replace(/\\left\s*/g, "")
+    .replace(/\\right\s*/g, "")
+    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "$1/$2")
+    .replace(/\\frac\s*([a-zA-Z0-9+\-^.]+)\s*([a-zA-Z0-9+\-^.]+)/g, "$1/$2")
+    .replace(/\\sqrt\{([^{}]+)\}/g, "sqrt($1)")
+    .replace(/\\cdot/g, "·")
+    .replace(/\\times/g, "×")
+    .replace(/\\div/g, "÷")
+    .replace(/\\([a-zA-Z]+)/g, "$1")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .trim();
+}
+
 export function supportsLocalAI() {
   return typeof navigator !== "undefined" && typeof WebAssembly !== "undefined" && "gpu" in navigator;
 }
@@ -86,7 +105,7 @@ export async function clearLocalAI() {
   await Promise.all([deleteModelAllInfoInCache(FAST_MODEL_ID), deleteModelAllInfoInCache(UPGRADE_MODEL_ID)]);
 }
 
-export async function askLocalAI(question: string, history: LocalAIMessage[] = []) {
+export async function askLocalAI(question: string, history: LocalAIMessage[] = [], options?: { raw?: boolean }) {
   const localEngine = await loadLocalAI();
   const response = await localEngine.chat.completions.create({
     model: activeModelId,
@@ -100,5 +119,6 @@ export async function askLocalAI(question: string, history: LocalAIMessage[] = [
   });
   const content = response.choices[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("AI 没有生成回答，请换一种问法再试一次。");
-  return content.trim();
+  const trimmed = content.trim();
+  return options?.raw ? trimmed : sanitizeAIText(trimmed);
 }

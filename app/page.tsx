@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
+import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
 
 type WrongQuestion = {
   id: string;
@@ -92,22 +92,9 @@ function toSuperscript(value: string) {
 
 function formatMathText(value: string) {
   if (!value) return value;
-  let text = value
-    .replace(/```[\s\S]*?```/g, (match) => match.replace(/```/g, ""))
-    .replace(/\\left\s*/g, "")
-    .replace(/\\right\s*/g, "")
-    .replace(/\\cdot/g, "·")
-    .replace(/\\times/g, "×")
-    .replace(/\\div/g, "÷")
-    .replace(/\\sqrt\{([^{}]+)\}/g, "sqrt($1)")
-    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "$1/$2")
-    .replace(/\\frac\s*([a-zA-Z0-9+\-^.]+)\s*([a-zA-Z0-9+\-^.]+)/g, "$1/$2")
+  let text = sanitizeAIText(value)
     .replace(/\\,|\\;|\\:/g, " ")
-    .replace(/\^\{([^{}]+)\}/g, (_, token: string) => `^(${token})`)
-    .replace(/\\([a-zA-Z]+)/g, "$1")
-    .replace(/[{}]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\^\{([^{}]+)\}/g, (_, token: string) => `^(${token})`);
 
   for (let i = 0; i < 2; i += 1) {
     const next = text.replace(/\(([^()]+)\)/g, "$1");
@@ -286,7 +273,7 @@ export default function Home() {
 拍照备注：${draft.photoHint || "未填写"}`;
     setAiBusy(true);
     try {
-      const raw = await askLocalAI(prompt, aiHistory);
+      const raw = await askLocalAI(prompt, aiHistory, { raw: true });
       const text = raw.replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/, "").trim();
       const parsed = JSON.parse(text) as Partial<DraftQuestion & { photoCaption?: string }>;
       setDraft((current) => ({
@@ -349,7 +336,7 @@ export default function Home() {
 解析：${draft.explanation || "未填写"}
 拍照备注：${draft.photoHint || "未填写"}`;
         setAiBusy(true);
-        const raw = await askLocalAI(prompt, aiHistory);
+        const raw = await askLocalAI(prompt, aiHistory, { raw: true });
         const text = raw.replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/, "").trim();
         const parsed = JSON.parse(text) as Partial<DraftQuestion>;
         nextDraft = {
