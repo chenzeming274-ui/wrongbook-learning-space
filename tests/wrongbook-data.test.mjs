@@ -64,3 +64,16 @@ test("rejects invalid imports without mutating valid legacy arrays", () => {
   assert.equal(result.ok, true);
   assert.equal(result.notebooks[0].questions[0].attempts, 0);
 });
+
+test("merges notebooks and skips duplicate questions without deleting local data", () => {
+  const current = data.migrateNotebooks([{ id: "math", name: "数学", questions: [{ id: "q1", stem: "1+1", answer: "2" }] }]);
+  const imported = data.migrateNotebooks([
+    { id: "other", name: "数学", questions: [{ id: "q1", stem: "1+1", answer: "2" }, { id: "q1", stem: "2+2", answer: "4" }] },
+    { id: "english", name: "英语", questions: [{ stem: "Hello", answer: "你好" }] },
+  ]);
+  const merged = data.mergeNotebooks(current, imported);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].questions.length, 2);
+  assert.equal(new Set(merged[0].questions.map((question) => question.id)).size, 2);
+  assert.equal(merged[1].name, "英语");
+});

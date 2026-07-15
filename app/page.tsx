@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isAnswerCorrect } from "../src/answer-utils";
+import { compressImage } from "../src/image-utils";
 import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
-import { calculateMastery, calculateNextReviewAt, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
+import { calculateMastery, calculateNextReviewAt, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
 
 const seedQuestion: WrongQuestion = {
   id: "q-1",
@@ -133,8 +134,8 @@ export default function Home() {
   const [aiClearing, setAiClearing] = useState(false);
   const [aiWasCleared, setAiWasCleared] = useState(false);
   const [upgradeProgress, setUpgradeProgress] = useState(0);
-  const [upgradeReady, setUpgradeReady] = useState(false);
   const [upgradeBusy, setUpgradeBusy] = useState(false);
+  const [aiUpgraded, setAiUpgraded] = useState(false);
   const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
   const [aiLoadRequested, setAiLoadRequested] = useState(false);
   const [aiCompatible, setAiCompatible] = useState<boolean | null>(null);
@@ -150,7 +151,12 @@ export default function Home() {
   const [reviewTodayOnly, setReviewTodayOnly] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"subjects" | "settings" | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoFeedback, setPhotoFeedback] = useState("");
+  const [importFeedback, setImportFeedback] = useState("");
+  const [pendingImport, setPendingImport] = useState<{ notebooks: Notebook[]; fileName: string } | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -200,14 +206,7 @@ export default function Home() {
         setAiReady(true);
         setAiWasCleared(false);
         localStorage.removeItem("wrongbook-ai-cleared");
-        prepareAIUpgrade((report) => {
-          if (!active) return;
-          setUpgradeProgress(Math.round(report.progress * 100));
-        }).then(() => {
-          if (!active) return;
-          setUpgradeReady(true);
-          notify("更强的 AI 已准备完成，可以升级。");
-        }).catch(() => { if (active) setUpgradeProgress(-1); });
+        setUpgradeProgress(0);
       })
       .catch((error: unknown) => {
         if (!active) return;
@@ -276,7 +275,7 @@ export default function Home() {
       localStorage.setItem("wrongbook-ai-cleared", "1");
       setAiProgress(0);
       setUpgradeProgress(0);
-      setUpgradeReady(false);
+      setAiUpgraded(false);
       notify("本机 AI 已清理，需要时会重新安装。");
     } catch {
       notify("清理未完成，请关闭其他打开的网站页面后重试。");
@@ -286,14 +285,16 @@ export default function Home() {
   }
 
   async function upgradeAiModel() {
-    if (upgradeBusy || !upgradeReady) return;
+    if (upgradeBusy || aiUpgraded) return;
     setUpgradeBusy(true);
     try {
+      await prepareAIUpgrade((report) => setUpgradeProgress(Math.round(report.progress * 100)));
       await upgradeLocalAI();
-      setUpgradeReady(false);
       setUpgradeProgress(100);
+      setAiUpgraded(true);
       notify("已升级，之前的对话已保留。");
     } catch {
+      setUpgradeProgress(-1);
       notify("升级未完成，请稍后再试。");
     } finally {
       setUpgradeBusy(false);
@@ -327,7 +328,32 @@ export default function Home() {
     setEditingQuestionId("");
     setDraftUsedAI(false);
     setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
+    setPhotoFeedback("");
+    if (photoInputRef.current) photoInputRef.current.value = "";
     setView("add");
+  }
+
+  async function handlePhotoUpload(file?: File) {
+    if (!file || photoBusy) return;
+    const replacing = Boolean(draft.photo);
+    setPhotoBusy(true);
+    setPhotoFeedback("正在压缩图片…");
+    try {
+      const compressed = await compressImage(file);
+      setDraft((current) => ({ ...current, photo: compressed.dataUrl, photoHint: current.photoHint || file.name }));
+      setPhotoFeedback(`${replacing ? "已替换上一张图片" : "图片已压缩"} · ${compressed.width}×${compressed.height} · ${Math.max(1, Math.round(compressed.bytes / 1024))}KB`);
+    } catch (error) {
+      setPhotoFeedback(error instanceof Error ? error.message : "图片处理失败，请换一张重试。");
+    } finally {
+      setPhotoBusy(false);
+      if (photoInputRef.current) photoInputRef.current.value = "";
+    }
+  }
+
+  function removeDraftPhoto() {
+    setDraft((current) => ({ ...current, photo: "", photoHint: "" }));
+    setPhotoFeedback("图片已移除");
+    if (photoInputRef.current) photoInputRef.current.value = "";
   }
 
   async function fillDraftWithAI() {
@@ -576,21 +602,33 @@ export default function Home() {
 
   async function importData(file?: File) {
     if (!file) return;
+    setImportFeedback("");
     try {
+      if (file.size > 10 * 1024 * 1024) { setImportFeedback("导入失败：JSON 文件超过 10MB。"); return; }
       const result = importWrongbookJSON(await file.text());
-      if (!result.ok) { notify(result.error); return; }
-      setNotebooks(result.notebooks);
-      setActiveId(result.notebooks[0].id);
-      setSelectedId(result.notebooks[0].questions[0]?.id || "");
-      setView("review");
-      setReviewTodayOnly(false);
+      if (!result.ok) { setImportFeedback(`导入失败：${result.error}`); notify(`导入失败：${result.error}`); return; }
+      setPendingImport({ notebooks: result.notebooks, fileName: file.name });
       setMobilePanel(null);
-      notify(`已导入 ${result.notebooks.length} 个题库`);
-    } catch {
-      notify("导入失败，请检查 JSON 文件");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "请检查 JSON 文件";
+      setImportFeedback(`导入失败：${message}`);
+      notify(`导入失败：${message}`);
     } finally {
       if (importInputRef.current) importInputRef.current.value = "";
     }
+  }
+
+  function applyImport(mode: "merge" | "replace") {
+    if (!pendingImport) return;
+    const next = mode === "merge" ? mergeNotebooks(notebooks, pendingImport.notebooks) : pendingImport.notebooks;
+    setNotebooks(next);
+    setActiveId(next[0].id);
+    setSelectedId(next[0].questions[0]?.id || "");
+    setView("review");
+    setReviewTodayOnly(false);
+    setPendingImport(null);
+    setImportFeedback(mode === "merge" ? "导入成功：已与现有数据合并。" : "导入成功：已用备份覆盖现有数据。");
+    notify(mode === "merge" ? "JSON 已合并导入" : "JSON 已覆盖导入");
   }
 
   function resetData() {
@@ -646,14 +684,15 @@ export default function Home() {
             <div className="ai-search-head"><div><span className="ai-kicker">本机 AI · 点击加载</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : aiLoadRequested ? "正在加载 AI 模型" : "需要时再启用，不占用启动流量"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : aiLoadRequested ? `${aiProgress}%` : "未加载"}</span></div>
             {!aiLoadRequested && !aiReady ? <div className="ai-idle"><div className={`ai-compatibility ${aiCompatible === null ? "checking" : aiCompatible ? "compatible" : "incompatible"}`}><strong>{aiCompatible === null ? "正在检查浏览器兼容性" : aiCompatible ? "此浏览器支持本机 AI" : "当前浏览器不支持本机 AI"}</strong><span>{aiCompatible === null ? "检查 WebGPU 和安全连接…" : aiCompatible ? "支持 WebGPU 且处于安全连接；模型只保存在本机浏览器。" : "需要支持 WebGPU 的新版 Safari 或 Chrome，并使用 HTTPS。"}</span></div><button className="ai-load-button" disabled={aiCompatible !== true} onClick={startAiLoad}>下载并启用 AI</button></div> : <><div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>{!aiReady && aiProgressText ? <div className="ai-progress-text">{aiProgressText}</div> : null}</>}
             {aiLoadError ? <div className="ai-error" role="alert"><span>{aiLoadError}</span><button onClick={retryAiLoad}>重新加载</button></div> : null}
-          {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div>{upgradeReady ? <div className="ai-upgrade"><span>更强 AI 已准备完成</span><button onClick={upgradeAiModel} disabled={upgradeBusy}>{upgradeBusy ? "正在升级…" : "升级"}</button></div> : upgradeProgress >= 0 && upgradeProgress < 100 ? <div className="ai-upgrade muted">后台准备更强 AI… {upgradeProgress}%</div> : null}<div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{aiHistory.length ? <><div className="ai-chat-history" aria-live="polite">{(showAiHistory ? aiHistory : aiHistory.slice(-2)).map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{formatMathText(message.content)}</p></div>)}</div>{aiHistory.length > 2 ? <button className="ai-history-toggle" onClick={() => setShowAiHistory((value) => !value)}>{showAiHistory ? "收起前九轮" : "显示前九轮对话"}</button> : null}</> : null}</> : null}
+          {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div><div className={`ai-upgrade ${upgradeBusy ? "loading" : ""}`}><span>{aiUpgraded ? "已使用高性能 AI" : upgradeBusy ? `正在下载并升级… ${Math.max(0, upgradeProgress)}%` : upgradeProgress < 0 ? "升级失败，可重新尝试" : "需要更强能力时再主动升级"}</span>{!aiUpgraded ? <button onClick={upgradeAiModel} disabled={upgradeBusy}>{upgradeBusy ? "升级中…" : upgradeProgress < 0 ? "重新升级" : "下载并升级"}</button> : null}</div><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{!aiBusy && !aiHistory.length ? <div className="ai-empty">AI 已就绪。输入知识点或一道题开始提问。</div> : null}{aiHistory.length ? <><div className="ai-chat-history" aria-live="polite">{(showAiHistory ? aiHistory : aiHistory.slice(-2)).map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{formatMathText(message.content)}</p></div>)}</div>{aiHistory.length > 2 ? <button className="ai-history-toggle" onClick={() => setShowAiHistory((value) => !value)}>{showAiHistory ? "收起前九轮" : "显示前九轮对话"}</button> : null}</> : null}</> : null}
           </section>
 
           {view === "add" ? (
             <section className="add-card">
               <div className="card-title"><div><p className="eyebrow">{editingQuestionId ? "编辑错题" : "记录一次错误"}</p><h2>{editingQuestionId ? "修改题目内容" : "把题目放进来"}</h2></div><span className="step-badge">保存到「{active?.name}」</span></div>
-              <label>拍照录入<input className="photo-input" type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => setDraft((current) => ({ ...current, photo: String(reader.result || ""), photoHint: current.photoHint || file.name })); reader.readAsDataURL(file); }} /></label>
-              {draft.photo ? <div className="photo-preview"><img src={draft.photo} alt="错题照片预览" /></div> : null}
+              <label>拍照录入（自动压缩，原图最大 12MB）<input ref={photoInputRef} className="photo-input" type="file" accept="image/*" capture="environment" disabled={photoBusy} onChange={(e) => void handlePhotoUpload(e.target.files?.[0])} /></label>
+              {photoFeedback ? <div className={`photo-feedback ${photoFeedback.includes("失败") || photoFeedback.includes("超过") || photoFeedback.includes("无法") ? "error" : ""}`} role="status">{photoFeedback}</div> : null}
+              {draft.photo ? <div className="photo-preview editing"><img src={draft.photo} alt="错题照片预览" /><div className="photo-actions"><button onClick={() => photoInputRef.current?.click()} disabled={photoBusy}>{photoBusy ? "处理中…" : "替换图片"}</button><button className="danger" onClick={removeDraftPhoto}>删除图片</button></div></div> : photoBusy ? <div className="photo-loading" aria-live="polite">正在读取并压缩图片，请稍候…</div> : null}
               <div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>拍照参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div>
               <div className="form-grid"><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="输入题目内容" /></label><label>正确答案（多个答案可用 | 或换行）<textarea className="short" value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="例如：0.5 | 1/2" /></label></div>
               <label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="写下解法、错误原因或让本机 AI 补全" /></label>
@@ -669,7 +708,7 @@ export default function Home() {
                     <div className="row-copy"><strong>{formatMathText(question.stem)}</strong><div className="question-meta"><span>{question.type || "未分类"} · {formatCreatedAt(question.createdAt)}</span><span className={`source-badge ${question.source || "manual"}`}>{sourceLabel(question.source)}</span><span>下次 {formatReviewDate(question.nextReviewAt)}</span></div></div>
                     <button className="row-menu" title={question.mastered ? "标记为未掌握" : "标记为已掌握"} aria-label={question.mastered ? "标记为未掌握" : "标记为已掌握"} onClick={(e) => { e.stopPropagation(); toggleQuestionMastered(question.id); }}>⠿</button>
                   </div>
-                )) : <div className="empty">{reviewTodayOnly ? "今天没有需要复习的题。" : "还没有错题，点击“录入错题”开始。"}</div>}
+                )) : <div className="empty-state"><strong>{query ? "没有找到匹配的错题" : reviewTodayOnly ? "今天的复习已完成" : "这里还没有错题"}</strong><span>{query ? "换个关键词，或清空搜索后再试。" : reviewTodayOnly ? "可以继续复盘全部错题，保持手感。" : "录入第一道错题后，就能开始复盘。"}</span><button onClick={query ? () => setQuery("") : reviewTodayOnly ? () => setReviewTodayOnly(false) : openAddView}>{query ? "清空搜索" : reviewTodayOnly ? "查看全部错题" : "录入错题"}</button></div>}
               </div>
               <article className="question-detail">{selected ? <><div className="detail-top"><div><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className={`source-badge ${selected.source || "manual"}`}>{sourceLabel(selected.source)}</span></div><span className="detail-date">{formatCreatedAt(selected.createdAt)}</span></div><h2>{formatMathText(selected.stem)}</h2><div className="question-meta"><span>答题 {selected.attempts} 次</span><span>掌握度 {getQuestionMastery(selected)}%</span><span>下次复习 {formatReviewDate(selected.nextReviewAt)}</span></div>{selected.photo ? <div className="photo-preview"><img src={selected.photo} alt="错题照片" /></div> : null}{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article>
             </div>
@@ -680,8 +719,9 @@ export default function Home() {
       </section>
       {mobilePanel ? <button className="mobile-sheet-backdrop" aria-label="关闭面板" onClick={() => setMobilePanel(null)} /> : null}
       {mobilePanel === "subjects" ? <section className="mobile-sheet" aria-label="切换学科"><div className="mobile-sheet-head"><h2>切换学科</h2><button aria-label="关闭" onClick={() => setMobilePanel(null)}>×</button></div><div className="mobile-subject-list">{notebooks.map((book) => <button className={book.id === activeId ? "active" : ""} key={book.id} onClick={() => selectNotebook(book)}><i className={`dot ${book.color}`} /><span>{book.name}</span><em>{book.questions.length}</em></button>)}</div><div className="new-book"><input value={newBook} onChange={(event) => setNewBook(event.target.value)} placeholder="新建题库…" /><button onClick={createNotebook}>创建</button></div></section> : null}
-      {mobilePanel === "settings" ? <section className="mobile-sheet" aria-label="设置"><div className="mobile-sheet-head"><h2>设置</h2><button aria-label="关闭" onClick={() => setMobilePanel(null)}>×</button></div><div className="mobile-settings-actions"><button onClick={() => importInputRef.current?.click()}>导入 JSON</button><button onClick={exportData}>导出 JSON</button><button onClick={resetData}>恢复初始数据</button>{aiReady ? <button onClick={() => void clearAiModel()}>清理本机 AI</button> : <button disabled={aiCompatible !== true} onClick={startAiLoad}>下载本机 AI</button>}</div><p>数据保存在当前设备。导入兼容旧版 wrongbook-data。</p></section> : null}
+      {mobilePanel === "settings" ? <section className="mobile-sheet" role="dialog" aria-modal="true" aria-label="设置"><div className="mobile-sheet-head"><h2>设置</h2><button aria-label="关闭" onClick={() => setMobilePanel(null)}>×</button></div><div className="mobile-settings-actions"><button onClick={() => importInputRef.current?.click()}>导入 JSON</button><button onClick={exportData}>导出 JSON</button><button onClick={resetData}>恢复初始数据</button>{aiReady ? <button onClick={() => void clearAiModel()}>清理本机 AI</button> : <button disabled={aiCompatible !== true} onClick={startAiLoad}>下载本机 AI</button>}</div>{importFeedback ? <p className={importFeedback.startsWith("导入失败") ? "import-feedback error" : "import-feedback success"}>{importFeedback}</p> : <p>数据保存在当前设备。导入兼容旧版 wrongbook-data。</p>}</section> : null}
       <nav className="mobile-nav" aria-label="手机端主导航"><button onClick={() => setMobilePanel(mobilePanel === "subjects" ? null : "subjects")}><span>▦</span>学科</button><button className={view === "review" ? "active" : ""} onClick={() => { setView("review"); setReviewTodayOnly(false); setMobilePanel(null); }}><span>✓</span>复习</button><button className={view === "add" ? "active" : ""} onClick={openAddView}><span>＋</span>添加</button><button onClick={() => setMobilePanel(mobilePanel === "settings" ? null : "settings")}><span>⚙</span>设置</button></nav>
+      {pendingImport ? <><button className="import-backdrop" aria-label="取消导入" onClick={() => setPendingImport(null)} /><section className="import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-title"><span className="dialog-kicker">JSON 导入</span><h2 id="import-title">如何处理这份备份？</h2><p>文件：{pendingImport.fileName}</p><div className="import-summary"><strong>{pendingImport.notebooks.length}</strong><span>个题库</span><strong>{pendingImport.notebooks.reduce((sum, book) => sum + book.questions.length, 0)}</strong><span>道错题</span></div><button className="import-choice primary-choice" onClick={() => applyImport("merge")}><strong>合并到现有数据</strong><span>保留本机内容，自动跳过重复题目</span></button><button className="import-choice danger-choice" onClick={() => applyImport("replace")}><strong>覆盖现有数据</strong><span>删除当前内容并使用这份备份</span></button><button className="dialog-cancel" onClick={() => setPendingImport(null)}>取消</button></section></> : null}
       {toast && <div className="toast">{toast}{lastDeleted ? <button onClick={undoDelete}>撤销</button> : null}</div>}
     </main>
   );

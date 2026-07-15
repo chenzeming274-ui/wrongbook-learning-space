@@ -294,6 +294,32 @@ export function importWrongbookJSON(json: string): ImportResult {
   return { ok: true, notebooks };
 }
 
+/** Merge an imported backup without deleting local notebooks or duplicate questions. */
+export function mergeNotebooks(current: Notebook[], imported: Notebook[]) {
+  const result = migrateNotebooks(current).map((book) => ({ ...book, questions: [...book.questions] }));
+  const usedBookIds = new Set(result.map((book) => book.id));
+
+  for (const incoming of migrateNotebooks(imported)) {
+    const target = result.find((book) => book.id === incoming.id || book.name.trim().toLocaleLowerCase() === incoming.name.trim().toLocaleLowerCase());
+    if (!target) {
+      const nextId = uniqueId(incoming.id, "notebook", result.length, usedBookIds);
+      result.push({ ...incoming, id: nextId });
+      continue;
+    }
+
+    const fingerprints = new Set(target.questions.map((question) => `${question.stem.trim().toLocaleLowerCase()}\u0000${question.answer.trim().toLocaleLowerCase()}`));
+    const usedQuestionIds = new Set(target.questions.map((question) => question.id));
+    incoming.questions.forEach((question, index) => {
+      const fingerprint = `${question.stem.trim().toLocaleLowerCase()}\u0000${question.answer.trim().toLocaleLowerCase()}`;
+      if (fingerprints.has(fingerprint)) return;
+      target.questions.push({ ...question, id: uniqueId(question.id, "question", target.questions.length + index, usedQuestionIds) });
+      fingerprints.add(fingerprint);
+    });
+  }
+
+  return result;
+}
+
 export function exportWrongbookJSON(notebooks: Notebook[]) {
   const payload: WrongbookExport = {
     version: 2,
