@@ -1,4 +1,4 @@
-import { CreateMLCEngine, type MLCEngine } from "@mlc-ai/web-llm";
+import { CreateMLCEngine, deleteModelAllInfoInCache, type MLCEngine } from "@mlc-ai/web-llm";
 
 /** Browser-native, Chinese-capable high-performance model. Downloads in-page once, then is cached. */
 export const LOCAL_AI_MODEL = "Qwen3-8B";
@@ -50,6 +50,15 @@ export async function loadLocalAI(onProgress?: ProgressListener) {
   } finally {
     if (onProgress) progressListeners.delete(onProgress);
   }
+}
+
+/** Remove only this AI model's downloaded files; learning data is stored separately. */
+export async function clearLocalAI() {
+  const activeEngine = engine;
+  engine = null;
+  enginePromise = null;
+  if (activeEngine) await activeEngine.unload();
+  await deleteModelAllInfoInCache(LOCAL_AI_MODEL_ID);
 }
 
 export async function askLocalAI(question: string, history: LocalAIMessage[] = []) {

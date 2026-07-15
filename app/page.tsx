@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { askLocalAI, loadLocalAI, type LocalAIMessage } from "../src/local-ai";
+import { askLocalAI, clearLocalAI, loadLocalAI, type LocalAIMessage } from "../src/local-ai";
 
 type WrongQuestion = {
   id: string;
@@ -72,6 +72,7 @@ export default function Home() {
   const [aiAnswer, setAiAnswer] = useState("");
   const [aiHistory, setAiHistory] = useState<LocalAIMessage[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiClearing, setAiClearing] = useState(false);
   const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
   const [draggedQuestionId, setDraggedQuestionId] = useState("");
   const [query, setQuery] = useState("");
@@ -130,6 +131,22 @@ export default function Home() {
     setAiLoadError("");
     setAiProgress(0);
     setAiRetryAttempt((value) => value + 1);
+  }
+
+  async function clearAiModel() {
+    if (aiClearing || !window.confirm("删除本机 AI 模型吗？错题和聊天记录不会受影响。")) return;
+    setAiClearing(true);
+    try {
+      await clearLocalAI();
+      setAiReady(false);
+      setAiLoadError("模型已清理，需要时可重新安装。");
+      setAiProgress(0);
+      notify("本机 AI 已清理，需要时会重新安装。");
+    } catch {
+      notify("清理未完成，请关闭其他打开的网站页面后重试。");
+    } finally {
+      setAiClearing(false);
+    }
   }
 
   async function runAiSearch() {
@@ -308,7 +325,7 @@ export default function Home() {
             <div className="ai-search-head"><div><span className="ai-kicker">本机 AI · 高性能</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : "正在安装 AI 模型"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : `${aiProgress}%`}</span></div>
             <div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>
             {aiLoadError ? <div className="ai-error" role="alert"><span>{aiLoadError}</span><button onClick={retryAiLoad}>重新加载</button></div> : null}
-            {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮</div><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{aiHistory.length ? <div className="ai-chat-history" aria-live="polite">{aiHistory.map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{message.content}</p></div>)}</div> : null}</> : null}
+            {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{aiHistory.length ? <div className="ai-chat-history" aria-live="polite">{aiHistory.map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{message.content}</p></div>)}</div> : null}</> : null}
           </section>
 
           {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="粘贴题目、题干或你的解题过程…" /></label><div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>正确答案<input value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="填入答案" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="为什么错？正确思路是什么？" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="primary" onClick={addQuestion}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>长按或拖动题目可调整顺序</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <button className={`question-row ${question.id === selected?.id ? "current" : ""} ${question.id === draggedQuestionId ? "dragging" : ""}`} key={question.id} draggable onDragStart={() => setDraggedQuestionId(question.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => reorderQuestion(question.id)} onDragEnd={() => setDraggedQuestionId("")} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{question.stem}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><span className="chevron">⠿</span></button>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{selected.stem}</h2>{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
