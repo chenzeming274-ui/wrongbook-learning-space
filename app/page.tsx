@@ -1,20 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
-
-type WrongQuestion = {
-  id: string;
-  stem: string;
-  answer: string;
-  explanation: string;
-  type: string;
-  createdAt: string;
-  mastered: boolean;
-  photo?: string;
-};
-
-type Notebook = { id: string; name: string; color: string; questions: WrongQuestion[] };
+import { useEffect, useMemo, useRef, useState } from "react";
+import { isAnswerCorrect } from "../src/answer-utils";
+import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
+import { calculateMastery, calculateNextReviewAt, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
 
 const seedQuestion: WrongQuestion = {
   id: "q-1",
@@ -24,6 +13,10 @@ const seedQuestion: WrongQuestion = {
   type: "二次函数",
   createdAt: "今天",
   mastered: false,
+  source: "manual",
+  attempts: 0,
+  correctAttempts: 0,
+  mastery: 0,
 };
 
 const starterNotebooks: Notebook[] = [
@@ -102,12 +95,31 @@ function formatMathText(value: string) {
   return toSuperscript(text).replace(/\s+([,，。；;])/g, "$1").trim();
 }
 
+function formatReviewDate(value?: string) {
+  if (!value) return "尚未安排";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "尚未安排";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+function formatCreatedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const today = new Date();
+  return date.toDateString() === today.toDateString() ? "今天" : formatReviewDate(value);
+}
+
+function sourceLabel(source?: WrongQuestion["source"]) {
+  if (source === "ai") return "AI 生成";
+  if (source === "bank") return "题库抽取";
+  return "手动录入";
+}
+
 export default function Home() {
   const [notebooks, setNotebooks] = useState<Notebook[]>(starterNotebooks);
   const [activeId, setActiveId] = useState("math");
   const [selectedId, setSelectedId] = useState("q-1");
   const [view, setView] = useState<"review" | "add">("review");
-  const [showAnswer, setShowAnswer] = useState(false);
   const [answerInput, setAnswerInput] = useState("");
   const [answerSubmitted, setAnswerSubmitted] = useState(false);
   const [answerCorrect, setAnswerCorrect] = useState(false);
@@ -115,7 +127,6 @@ export default function Home() {
   const [aiReady, setAiReady] = useState(false);
   const [aiQuery, setAiQuery] = useState("");
   const [aiLoadError, setAiLoadError] = useState("");
-  const [aiAnswer, setAiAnswer] = useState("");
   const [aiHistory, setAiHistory] = useState<LocalAIMessage[]>([]);
   const [showAiHistory, setShowAiHistory] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -125,44 +136,63 @@ export default function Home() {
   const [upgradeReady, setUpgradeReady] = useState(false);
   const [upgradeBusy, setUpgradeBusy] = useState(false);
   const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
+  const [aiLoadRequested, setAiLoadRequested] = useState(false);
+  const [aiCompatible, setAiCompatible] = useState<boolean | null>(null);
+  const [aiProgressText, setAiProgressText] = useState("");
   const [draggedQuestionId, setDraggedQuestionId] = useState("");
   const [query, setQuery] = useState("");
   const [newBook, setNewBook] = useState("");
   const [draft, setDraft] = useState<DraftQuestion>({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
+  const [draftUsedAI, setDraftUsedAI] = useState(false);
   const [toast, setToast] = useState("");
+  const [editingQuestionId, setEditingQuestionId] = useState("");
+  const [lastDeleted, setLastDeleted] = useState<{ bookId: string; question: WrongQuestion; index: number } | null>(null);
+  const [reviewTodayOnly, setReviewTodayOnly] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState<"subjects" | "settings" | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const saved = localStorage.getItem("wrongbook-data");
-    if (saved) {
-      try { setNotebooks(JSON.parse(saved)); } catch { localStorage.removeItem("wrongbook-data"); }
-    }
-    const savedAiHistory = localStorage.getItem("wrongbook-ai-history");
-    if (savedAiHistory) {
-      try {
-        const parsed = JSON.parse(savedAiHistory) as LocalAIMessage[];
-        setAiHistory(parsed.slice(-20).map((message) => ({
-          ...message,
-          content: message.role === "assistant" ? sanitizeAIText(message.content) : message.content,
-        })));
-      } catch { localStorage.removeItem("wrongbook-ai-history"); }
-    }
-    if (localStorage.getItem("wrongbook-ai-cleared") === "1") setAiWasCleared(true);
-    setLoaded(true);
+    const timer = window.setTimeout(() => {
+      const saved = localStorage.getItem("wrongbook-data");
+      if (saved) {
+        try {
+          const migrated = migrateNotebooks(JSON.parse(saved));
+          if (migrated.length) {
+            setNotebooks(migrated);
+            setActiveId(migrated[0].id);
+            setSelectedId(migrated[0].questions[0]?.id ?? "");
+          }
+        } catch { localStorage.removeItem("wrongbook-data"); }
+      }
+      const savedAiHistory = localStorage.getItem("wrongbook-ai-history");
+      if (savedAiHistory) {
+        try {
+          const parsed = JSON.parse(savedAiHistory) as LocalAIMessage[];
+          setAiHistory(parsed.slice(-20).map((message) => ({
+            ...message,
+            content: message.role === "assistant" ? sanitizeAIText(message.content) : message.content,
+          })));
+        } catch { localStorage.removeItem("wrongbook-ai-history"); }
+      }
+      if (localStorage.getItem("wrongbook-ai-cleared") === "1") setAiWasCleared(true);
+      setLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
     if (loaded) localStorage.setItem("wrongbook-data", JSON.stringify(notebooks));
   }, [loaded, notebooks]);
 
-  useEffect(() => { setShowAnswer(false); setAnswerSubmitted(false); setAnswerInput(""); setAnswerCorrect(false); }, [selectedId]);
-
   useEffect(() => {
+    if (!aiLoadRequested) return;
     let active = true;
 
     loadLocalAI((report) => {
       if (!active) return;
       setAiProgress(Math.max(0, Math.min(100, Math.round(report.progress * 100))));
+      setAiProgressText(report.text);
     })
       .then(() => {
         if (!active) return;
@@ -186,18 +216,51 @@ export default function Home() {
       });
 
     return () => { active = false; };
-  }, [aiRetryAttempt]);
+  }, [aiLoadRequested, aiRetryAttempt]);
 
   const active = notebooks.find((book) => book.id === activeId) ?? notebooks[0];
-  const selected = active?.questions.find((question) => question.id === selectedId) ?? active?.questions[0];
-  const filtered = useMemo(() => active?.questions.filter((q) => q.stem.includes(query) || q.type.includes(query)) ?? [], [active, query]);
+  const filtered = useMemo(() => active?.questions.filter((q) => (!reviewTodayOnly || isDueToday(q)) && (q.stem.includes(query) || q.type.includes(query))) ?? [], [active, query, reviewTodayOnly]);
+  const selected = reviewTodayOnly ? filtered.find((question) => question.id === selectedId) ?? filtered[0] : active?.questions.find((question) => question.id === selectedId) ?? active?.questions[0];
+  const stats = useMemo(() => getReviewStats(notebooks), [notebooks]);
+  const activeStats = useMemo(() => getReviewStats(active ? [active] : []), [active]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAiCompatible(supportsLocalAI() && window.isSecureContext), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
-  function notify(message: string) { setToast(message); window.setTimeout(() => setToast(""), 2200); }
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setAnswerSubmitted(false);
+      setAnswerInput("");
+      setAnswerCorrect(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [selected?.id]);
+
+  function notify(message: string) {
+    if (!message.includes("可撤销")) setLastDeleted(null);
+    setToast(message);
+    window.setTimeout(() => {
+      setToast("");
+      if (message.includes("可撤销")) setLastDeleted(null);
+    }, message.includes("可撤销") ? 4500 : 2200);
+  }
+
+  function startAiLoad() {
+    setAiReady(false);
+    setAiProgress(0);
+    setAiProgressText("正在准备下载…");
+    if (!supportsLocalAI() || !window.isSecureContext) {
+      setAiLoadRequested(false);
+      setAiLoadError("当前浏览器不支持 WebGPU，或页面未使用安全连接。请更新 Safari/Chrome 后重试。");
+      return;
+    }
+    setAiLoadRequested(true);
+    setAiLoadError("");
+  }
 
   function retryAiLoad() {
-    setAiReady(false);
-    setAiLoadError("");
-    setAiProgress(0);
+    startAiLoad();
     setAiRetryAttempt((value) => value + 1);
   }
 
@@ -207,7 +270,8 @@ export default function Home() {
     try {
       await clearLocalAI();
       setAiReady(false);
-      setAiLoadError("模型已清理，需要时可重新安装。");
+      setAiLoadRequested(false);
+      setAiLoadError("");
       setAiWasCleared(true);
       localStorage.setItem("wrongbook-ai-cleared", "1");
       setAiProgress(0);
@@ -239,17 +303,17 @@ export default function Home() {
   async function runAiSearch() {
     if (!aiReady || !aiQuery.trim() || aiBusy) return;
     setAiBusy(true);
-    setAiAnswer("");
     try {
       const question = aiQuery.trim();
       const answer = await askLocalAI(question, aiHistory);
-      const nextHistory: LocalAIMessage[] = [...aiHistory, { role: "user", content: question }, { role: "assistant", content: answer }].slice(-20);
-      setAiAnswer(answer);
+      const userMessage: LocalAIMessage = { role: "user", content: question };
+      const assistantMessage: LocalAIMessage = { role: "assistant", content: answer };
+      const nextHistory: LocalAIMessage[] = [...aiHistory, userMessage, assistantMessage].slice(-20);
       setAiHistory(nextHistory);
       localStorage.setItem("wrongbook-ai-history", JSON.stringify(nextHistory));
       setAiQuery("");
     } catch (error) {
-      setAiAnswer(error instanceof Error ? error.message : "回答生成失败，请稍后重试。");
+      notify(error instanceof Error ? error.message : "回答生成失败，请稍后重试。");
     } finally {
       setAiBusy(false);
     }
@@ -258,8 +322,11 @@ export default function Home() {
   function openAddView() {
     if (aiWasCleared && !aiReady) {
       const shouldDownload = window.confirm("本机 AI 已清理，要现在重新下载吗？");
-      if (shouldDownload) retryAiLoad();
+      if (shouldDownload) startAiLoad();
     }
+    setEditingQuestionId("");
+    setDraftUsedAI(false);
+    setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
     setView("add");
   }
 
@@ -287,6 +354,7 @@ export default function Home() {
         photo: current.photo,
         photoHint: current.photoHint,
       }));
+      setDraftUsedAI(true);
       notify("已自动补全");
     } catch {
       notify("自动补全失败，请手动填写");
@@ -297,8 +365,16 @@ export default function Home() {
 
   function createNotebook() {
     if (!newBook.trim()) return;
-    const book = { id: uid(), name: newBook.trim(), color: "blue", questions: [] };
+    const book: Notebook = { id: uid(), name: newBook.trim(), color: "blue", questions: [] };
     setNotebooks((books) => [...books, book]); setActiveId(book.id); setNewBook(""); notify("题库已创建");
+  }
+
+  function selectNotebook(book: Notebook) {
+    setActiveId(book.id);
+    setSelectedId(book.questions[0]?.id || "");
+    setView("review");
+    setReviewTodayOnly(false);
+    setMobilePanel(null);
   }
 
   function renameNotebook(id: string) {
@@ -326,6 +402,7 @@ export default function Home() {
   async function addQuestion() {
     const needsFill = !draft.stem.trim() || !draft.answer.trim() || !draft.explanation.trim() || !draft.type.trim();
     let nextDraft = { ...draft };
+    let usedAI = false;
     if (needsFill) {
       if (!aiReady) {
         notify("有空项，先补齐参数或重新下载本机 AI");
@@ -350,6 +427,7 @@ export default function Home() {
           photo: draft.photo,
           photoHint: draft.photoHint,
         };
+        usedAI = true;
         setDraft(nextDraft);
         notify("已自动补全");
       } catch {
@@ -363,17 +441,51 @@ export default function Home() {
       notify("有空项，先补齐参数");
       return;
     }
-    const question = { stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), photo: nextDraft.photo, id: uid(), createdAt: "刚刚", mastered: false };
+    if (editingQuestionId) {
+      setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((question) => question.id === editingQuestionId ? { ...question, stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), photo: nextDraft.photo || undefined, source: usedAI || draftUsedAI ? "ai" : question.source } : question) } : book));
+      setSelectedId(editingQuestionId);
+      setEditingQuestionId("");
+      setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
+      setDraftUsedAI(false);
+      setView("review");
+      notify("错题已更新");
+      return;
+    }
+    const question: WrongQuestion = { stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), ...(nextDraft.photo ? { photo: nextDraft.photo } : {}), id: uid(), createdAt: new Date().toISOString(), mastered: false, source: usedAI || draftUsedAI ? "ai" : "manual", attempts: 0, correctAttempts: 0, mastery: 0 };
     setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [question, ...book.questions] } : book));
-    setSelectedId(question.id); setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" }); setView("review"); setShowAnswer(false); notify("错题已保存");
+    setSelectedId(question.id); setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" }); setDraftUsedAI(false); setView("review"); notify("错题已保存");
+  }
+
+  function openEditQuestion() {
+    if (!selected) return;
+    setEditingQuestionId(selected.id);
+    setDraft({ stem: selected.stem, answer: selected.answer, explanation: selected.explanation, type: selected.type, photo: selected.photo || "", photoHint: "" });
+    setView("add");
   }
 
   function deleteQuestion() {
     if (!selected || !window.confirm("确定删除这道错题吗？")) return;
+    const index = active.questions.findIndex((question) => question.id === selected.id);
+    setLastDeleted({ bookId: activeId, question: selected, index: Math.max(0, index) });
     const remaining = active.questions.filter((question) => question.id !== selected.id);
     setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: remaining } : book));
     setSelectedId(remaining[0]?.id || "");
-    notify("错题已删除");
+    notify("错题已删除，可撤销");
+  }
+
+  function undoDelete() {
+    if (!lastDeleted) return;
+    if (!notebooks.some((book) => book.id === lastDeleted.bookId)) { setLastDeleted(null); setToast(""); return; }
+    setNotebooks((books) => books.map((book) => {
+      if (book.id !== lastDeleted.bookId || book.questions.some((question) => question.id === lastDeleted.question.id)) return book;
+      const questions = [...book.questions];
+      questions.splice(Math.min(lastDeleted.index, questions.length), 0, lastDeleted.question);
+      return { ...book, questions };
+    }));
+    setActiveId(lastDeleted.bookId);
+    setSelectedId(lastDeleted.question.id);
+    setLastDeleted(null);
+    setToast("");
   }
 
   function reorderQuestion(targetId: string) {
@@ -390,24 +502,45 @@ export default function Home() {
 
   function generatePractice() {
     const templates = generated[selected?.type || ""] || generated.default;
-    const practices = templates.map((template) => ({ ...template, id: uid(), type: selected?.type || "综合", createdAt: "刚刚", mastered: false }));
+    const practices: WrongQuestion[] = templates.map((template) => ({ ...template, id: uid(), type: selected?.type || "综合", createdAt: new Date().toISOString(), mastered: false, source: "bank", attempts: 0, correctAttempts: 0, mastery: 0 }));
     setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [...practices, ...book.questions] } : book));
-    setSelectedId(practices[0].id); setShowAnswer(false); notify("已生成 3 道同类练习题");
+    setSelectedId(practices[0].id); notify("已从题库抽取 3 道同类题");
   }
 
   function generateOnePractice() {
     const templates = generated[selected?.type || ""] || generated.default;
     const template = templates[Math.floor(Math.random() * templates.length)];
-    const practice = { ...template, id: uid(), type: selected?.type || "综合", createdAt: "刚刚", mastered: false };
+    const practice: WrongQuestion = { ...template, id: uid(), type: selected?.type || "综合", createdAt: new Date().toISOString(), mastered: false, source: "bank", attempts: 0, correctAttempts: 0, mastery: 0 };
     setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [practice, ...book.questions] } : book));
-    notify("答错了，已追加一道同类题");
+    setSelectedId(practice.id);
+    notify("答错了，已从题库追加一道同类题");
+  }
+
+  async function generateAiPractice() {
+    if (!selected) return;
+    if (!aiReady) { startAiLoad(); notify("请先加载本机 AI"); return; }
+    setAiBusy(true);
+    try {
+      const raw = await askLocalAI(`根据这道错题生成 3 道同类型但数值不同的练习题，只输出 JSON 数组，每项包含 stem、answer、explanation、type。不要 LaTeX。原题：${selected.stem}；答案：${selected.answer}；类型：${selected.type}`, aiHistory, { raw: true });
+      const parsed = JSON.parse(raw.replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/, "").trim()) as Array<Partial<WrongQuestion>>;
+      const practices: WrongQuestion[] = parsed.slice(0, 3).filter((item) => item.stem && item.answer).map((item) => ({ id: uid(), stem: String(item.stem), answer: String(item.answer), explanation: String(item.explanation || "请根据同类题方法完成。"), type: String(item.type || selected.type), createdAt: new Date().toISOString(), mastered: false, source: "ai", attempts: 0, correctAttempts: 0, mastery: 0 }));
+      if (!practices.length) throw new Error("没有有效题目");
+      setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [...practices, ...book.questions] } : book));
+      setSelectedId(practices[0].id);
+      notify(`AI 已生成 ${practices.length} 道同类题`);
+    } catch {
+      notify("AI 生成失败，可改用题库抽取");
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   function submitAnswer() {
     if (!selected || !answerInput.trim()) { notify("请先输入答案"); return; }
-    const normalize = (value: string) => value.trim().replace(/\s+/g, "").toLowerCase();
-    const correct = normalize(answerInput) === normalize(selected.answer);
-    setAnswerCorrect(correct); setAnswerSubmitted(true); setShowAnswer(true);
+    const acceptedAnswers = [selected.answer, ...(selected.acceptedAnswers || [])];
+    const correct = isAnswerCorrect(answerInput, acceptedAnswers, { absoluteTolerance: 1e-4, relativeTolerance: 1e-4 });
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((question) => question.id === selected.id ? { ...recordReview(question, correct), mastered: correct ? question.mastered : false } : question) } : book));
+    setAnswerCorrect(correct); setAnswerSubmitted(true);
     if (correct) notify("回答正确，可以标记为已掌握");
     else generateOnePractice();
   }
@@ -418,21 +551,20 @@ export default function Home() {
       deleteQuestion();
       return;
     }
-    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === selected.id ? { ...q, mastered: true } : q) } : book));
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === selected.id ? { ...q, mastered: true, mastery: 100, nextReviewAt: calculateNextReviewAt(100) } : q) } : book));
     notify("已移入已掌握");
   }
 
-  function toggleMastered() {
-    if (!selected) return;
-    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === selected.id ? { ...q, mastered: !q.mastered } : q) } : book));
-  }
-
   function toggleQuestionMastered(id: string) {
-    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => q.id === id ? { ...q, mastered: !q.mastered } : q) } : book));
+    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((q) => {
+      if (q.id !== id) return q;
+      const mastered = !q.mastered;
+      return { ...q, mastered, mastery: mastered ? 100 : calculateMastery(q.attempts, q.correctAttempts), nextReviewAt: mastered ? calculateNextReviewAt(100) : new Date().toISOString() };
+    }) } : book));
   }
 
   function exportData() {
-    const blob = new Blob([JSON.stringify(notebooks, null, 2)], { type: "application/json" });
+    const blob = new Blob([exportWrongbookJSON(notebooks)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -442,12 +574,30 @@ export default function Home() {
     notify("备份已导出");
   }
 
+  async function importData(file?: File) {
+    if (!file) return;
+    try {
+      const result = importWrongbookJSON(await file.text());
+      if (!result.ok) { notify(result.error); return; }
+      setNotebooks(result.notebooks);
+      setActiveId(result.notebooks[0].id);
+      setSelectedId(result.notebooks[0].questions[0]?.id || "");
+      setView("review");
+      setReviewTodayOnly(false);
+      setMobilePanel(null);
+      notify(`已导入 ${result.notebooks.length} 个题库`);
+    } catch {
+      notify("导入失败，请检查 JSON 文件");
+    } finally {
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
+  }
+
   function resetData() {
     if (!window.confirm("确定清空本机数据并恢复示例题库吗？")) return;
-    setNotebooks(starterNotebooks);
+    setNotebooks(migrateNotebooks(starterNotebooks));
     setActiveId("math");
     setSelectedId("q-1");
-    setShowAnswer(false);
     notify("已恢复初始数据");
   }
 
@@ -468,7 +618,7 @@ export default function Home() {
         <div className="book-list">
           {notebooks.map((book) => (
             <div className={`book-item ${book.id === activeId ? "selected" : ""}`} key={book.id}>
-                <button className="book-link" onClick={() => { setActiveId(book.id); setSelectedId(book.questions[0]?.id || ""); setView("review"); }}>
+                <button className="book-link" onClick={() => selectNotebook(book)}>
                 <i className={`dot ${book.color}`} />
                 <span>{book.name}</span>
                 <em>{book.questions.length}</em>
@@ -481,28 +631,58 @@ export default function Home() {
           ))}
         </div>
         <div className="new-book"><input id="new-book" value={newBook} onChange={(e) => setNewBook(e.target.value)} onKeyDown={(e) => e.key === "Enter" && createNotebook()} placeholder="新建题库…" /><button onClick={createNotebook}>创建</button></div>
-        <div className="data-actions"><button onClick={exportData}>导出备份</button><button onClick={resetData}>清空数据</button></div>
+        <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => void importData(event.target.files?.[0])} />
+        <div className="data-actions"><button onClick={() => importInputRef.current?.click()}>导入 JSON</button><button onClick={exportData}>导出 JSON</button><button onClick={resetData}>清空数据</button></div>
         <div className="sidebar-foot"><span className="status-dot" />本地模式 · 数据保存在此设备</div>
       </aside>
 
       <section className="workspace">
         <header className="topbar"><div className="breadcrumb">我的题库 <span>/</span> <strong>{active?.name || "未命名题库"}</strong></div><div className="top-actions"><label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索错题或知识点" /><kbd>⌘ K</kbd></label><button className="icon-button" aria-label="通知">♧</button><button className="avatar">学</button></div></header>
         <div className="content">
-          <div className="page-heading"><div><p className="eyebrow">学习进度 <span>·</span> {active?.name}</p><h1>把错题变成<br /><i>下一次的得分</i></h1><p className="subheading">理解错误、掌握方法，再用三道新题确认真的学会。</p></div><div className="progress-card"><div className="ring"><span>{active?.questions.filter((q) => q.mastered).length || 0}</span><small>/ {active?.questions.length || 0}</small></div><div><strong>掌握进度</strong><span>继续保持，慢慢变强</span></div></div></div>
-          <div className="tabs"><button className={view === "review" ? "tab active" : "tab"} onClick={() => setView("review")}>错题复盘 <span>{active?.questions.length || 0}</span></button><button className={view === "add" ? "tab active" : "tab"} onClick={() => setView("add")}>＋ 录入错题</button><button className={`ai-tab ${aiReady ? "ready" : ""}`} disabled={!aiReady} onClick={() => document.getElementById("ai-search")?.focus()}>✦ AI 搜索</button></div>
-          <section className={`ai-search-card ${aiReady ? "ready" : aiLoadError ? "error" : "loading"}`}>
-            <div className="ai-search-head"><div><span className="ai-kicker">本机 AI · 高性能</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : "正在安装 AI 模型"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : `${aiProgress}%`}</span></div>
-            <div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>
+          <div className="page-heading"><div><p className="eyebrow">学习进度 <span>·</span> {active?.name}</p><h1>把错题变成<br /><i>下一次的得分</i></h1><p className="subheading">理解错误、掌握方法，再用三道新题确认真的学会。</p></div><div className="progress-card"><div className="ring"><span>{activeStats.mastery}</span><small>%</small></div><div><strong>掌握度</strong><span>{activeStats.correctAttempts} 次答对 · {activeStats.attempts} 次作答</span></div></div></div>
+          <div className="review-summary"><button className="review-stat" onClick={() => { setView("review"); setReviewTodayOnly(true); }}><strong>{activeStats.dueToday}</strong><span>今日复习</span></button><div className="review-stat"><strong>{activeStats.attempts}</strong><span>答题次数</span></div><div className="review-stat"><strong>{activeStats.mastery}%</strong><span>掌握度</span></div><div className="review-stat"><strong>{stats.totalQuestions}</strong><span>全部错题</span></div></div>
+          <div className="tabs"><button className={view === "review" && !reviewTodayOnly ? "tab active" : "tab"} onClick={() => { setView("review"); setReviewTodayOnly(false); }}>错题复盘 <span>{active?.questions.length || 0}</span></button><button className={view === "review" && reviewTodayOnly ? "tab active" : "tab"} onClick={() => { setView("review"); setReviewTodayOnly(true); }}>今日复习 <span>{activeStats.dueToday}</span></button><button className={view === "add" ? "tab active" : "tab"} onClick={openAddView}>＋ 录入错题</button><button className={`ai-tab ${aiReady ? "ready" : ""}`} onClick={() => { if (!aiReady) startAiLoad(); window.setTimeout(() => document.getElementById(aiReady ? "ai-search" : "ai-card")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0); }}>✦ AI 搜索</button></div>
+          <section id="ai-card" className={`ai-search-card ${aiReady ? "ready" : aiLoadError ? "error" : aiLoadRequested ? "loading" : "idle"}`}>
+            <div className="ai-search-head"><div><span className="ai-kicker">本机 AI · 点击加载</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : aiLoadRequested ? "正在加载 AI 模型" : "需要时再启用，不占用启动流量"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : aiLoadRequested ? `${aiProgress}%` : "未加载"}</span></div>
+            {!aiLoadRequested && !aiReady ? <div className="ai-idle"><div className={`ai-compatibility ${aiCompatible === null ? "checking" : aiCompatible ? "compatible" : "incompatible"}`}><strong>{aiCompatible === null ? "正在检查浏览器兼容性" : aiCompatible ? "此浏览器支持本机 AI" : "当前浏览器不支持本机 AI"}</strong><span>{aiCompatible === null ? "检查 WebGPU 和安全连接…" : aiCompatible ? "支持 WebGPU 且处于安全连接；模型只保存在本机浏览器。" : "需要支持 WebGPU 的新版 Safari 或 Chrome，并使用 HTTPS。"}</span></div><button className="ai-load-button" disabled={aiCompatible !== true} onClick={startAiLoad}>下载并启用 AI</button></div> : <><div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>{!aiReady && aiProgressText ? <div className="ai-progress-text">{aiProgressText}</div> : null}</>}
             {aiLoadError ? <div className="ai-error" role="alert"><span>{aiLoadError}</span><button onClick={retryAiLoad}>重新加载</button></div> : null}
           {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div>{upgradeReady ? <div className="ai-upgrade"><span>更强 AI 已准备完成</span><button onClick={upgradeAiModel} disabled={upgradeBusy}>{upgradeBusy ? "正在升级…" : "升级"}</button></div> : upgradeProgress >= 0 && upgradeProgress < 100 ? <div className="ai-upgrade muted">后台准备更强 AI… {upgradeProgress}%</div> : null}<div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{aiHistory.length ? <><div className="ai-chat-history" aria-live="polite">{(showAiHistory ? aiHistory : aiHistory.slice(-2)).map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{formatMathText(message.content)}</p></div>)}</div>{aiHistory.length > 2 ? <button className="ai-history-toggle" onClick={() => setShowAiHistory((value) => !value)}>{showAiHistory ? "收起前九轮" : "显示前九轮对话"}</button> : null}</> : null}</> : null}
           </section>
 
-          {view === "add" ? <section className="add-card"><div className="card-title"><div><p className="eyebrow">记录一次错误</p><h2>把题目放进来</h2></div><span className="step-badge">自动保存到「{active?.name}」</span></div><label>拍照录入<input className="photo-input" type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => setDraft((current) => ({ ...current, photo: String(reader.result || ""), photoHint: current.photoHint || file.name })); reader.readAsDataURL(file); }} /></label>{draft.photo ? <div className="photo-preview"><img src={draft.photo} alt="错题照片预览" /></div> : null}<div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>拍照参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div><div className="form-grid"><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="如果不写，就点右侧自动补全" /></label><label>正确答案<textarea className="short" value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="可留空，交给本地 AI 补全" /></label></div><label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="可留空，交给本地 AI 补全" /></label><div className="form-actions"><button className="ghost" onClick={() => setView("review")}>取消</button><button className="ghost" onClick={fillDraftWithAI} disabled={!aiReady || aiBusy}>{aiBusy ? "补全中…" : "自动补全"}</button><button className="primary" onClick={() => void addQuestion()}>保存这道错题 <span>→</span></button></div></section> : <div className="review-grid"><div className="question-list"><div className="list-head"><div><h2>待复盘题目</h2><p>长按或拖动题目可调整顺序</p></div><span className="count-pill">{filtered.length} 道</span></div>{filtered.length ? filtered.map((question) => <div className={`question-row ${question.id === selected?.id ? "current" : ""} ${question.id === draggedQuestionId ? "dragging" : ""}`} key={question.id} role="button" tabIndex={0} draggable onDragStart={() => setDraggedQuestionId(question.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => reorderQuestion(question.id)} onDragEnd={() => setDraggedQuestionId("")} onClick={() => { setSelectedId(question.id); setShowAnswer(true); }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedId(question.id); setShowAnswer(true); } }}><div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div><div className="row-copy"><strong>{formatMathText(question.stem)}</strong><span>{question.type || "未分类"} · {question.createdAt}</span></div><button className="row-menu" title={question.mastered ? "标记为未掌握" : "标记为已掌握"} aria-label={question.mastered ? "标记为未掌握" : "标记为已掌握"} onClick={(e) => { e.stopPropagation(); toggleQuestionMastered(question.id); }}>{question.mastered ? "⠿" : "⠿"}</button></div>) : <div className="empty">还没有错题，点击“录入错题”开始。</div>}</div><article className="question-detail">{selected ? <><div className="detail-top"><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className="detail-date">{selected.createdAt}</span></div><h2>{formatMathText(selected.stem)}</h2>{selected.photo ? <div className="photo-preview"><img src={selected.photo} alt="错题照片" /></div> : null}{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article></div>}
-          {view === "review" && selected && <div className="question-tools"><button onClick={deleteQuestion}>删除当前错题</button></div>}
-          {view === "review" && selected && <section className="practice-banner"><div className="practice-shape">✦</div><div><p className="eyebrow">举一反三</p><h2>真的掌握了吗？</h2><p>用三道相似但不重复的题，检验你是否掌握了解题方法。</p></div><button className="primary" onClick={generatePractice}>生成 3 道练习题 <span>→</span></button></section>}
+          {view === "add" ? (
+            <section className="add-card">
+              <div className="card-title"><div><p className="eyebrow">{editingQuestionId ? "编辑错题" : "记录一次错误"}</p><h2>{editingQuestionId ? "修改题目内容" : "把题目放进来"}</h2></div><span className="step-badge">保存到「{active?.name}」</span></div>
+              <label>拍照录入<input className="photo-input" type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => setDraft((current) => ({ ...current, photo: String(reader.result || ""), photoHint: current.photoHint || file.name })); reader.readAsDataURL(file); }} /></label>
+              {draft.photo ? <div className="photo-preview"><img src={draft.photo} alt="错题照片预览" /></div> : null}
+              <div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>拍照参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div>
+              <div className="form-grid"><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="输入题目内容" /></label><label>正确答案（多个答案可用 | 或换行）<textarea className="short" value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="例如：0.5 | 1/2" /></label></div>
+              <label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="写下解法、错误原因或让本机 AI 补全" /></label>
+              <div className="form-actions"><button className="ghost" onClick={() => { setEditingQuestionId(""); setDraftUsedAI(false); setView("review"); }}>取消</button><button className="ghost" onClick={() => { if (aiReady) void fillDraftWithAI(); else startAiLoad(); }}>{aiBusy ? "补全中…" : aiReady ? "AI 自动补全" : "加载 AI 后补全"}</button><button className="primary" onClick={() => void addQuestion()}>{editingQuestionId ? "保存修改" : "保存这道错题"} <span>→</span></button></div>
+            </section>
+          ) : (
+            <div className="review-grid">
+              <div className="question-list">
+                <div className="list-head"><div><h2>{reviewTodayOnly ? "今日复习" : "待复盘题目"}</h2><p>长按或拖动题目可调整顺序</p></div><span className="count-pill">{filtered.length} 道</span></div>
+                {filtered.length ? filtered.map((question) => (
+                  <div className={`question-row ${question.id === selected?.id ? "current" : ""} ${question.id === draggedQuestionId ? "dragging" : ""}`} key={question.id} role="button" tabIndex={0} draggable onDragStart={() => setDraggedQuestionId(question.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => reorderQuestion(question.id)} onDragEnd={() => setDraggedQuestionId("")} onClick={() => setSelectedId(question.id)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedId(question.id); } }}>
+                    <div className="row-index">{question.mastered ? "✓" : "0" + (active?.questions.indexOf(question) + 1)}</div>
+                    <div className="row-copy"><strong>{formatMathText(question.stem)}</strong><div className="question-meta"><span>{question.type || "未分类"} · {formatCreatedAt(question.createdAt)}</span><span className={`source-badge ${question.source || "manual"}`}>{sourceLabel(question.source)}</span><span>下次 {formatReviewDate(question.nextReviewAt)}</span></div></div>
+                    <button className="row-menu" title={question.mastered ? "标记为未掌握" : "标记为已掌握"} aria-label={question.mastered ? "标记为未掌握" : "标记为已掌握"} onClick={(e) => { e.stopPropagation(); toggleQuestionMastered(question.id); }}>⠿</button>
+                  </div>
+                )) : <div className="empty">{reviewTodayOnly ? "今天没有需要复习的题。" : "还没有错题，点击“录入错题”开始。"}</div>}
+              </div>
+              <article className="question-detail">{selected ? <><div className="detail-top"><div><span className={`tag ${selected.mastered ? "done" : ""}`}>{selected.mastered ? "已掌握" : "待复盘"}</span><span className={`source-badge ${selected.source || "manual"}`}>{sourceLabel(selected.source)}</span></div><span className="detail-date">{formatCreatedAt(selected.createdAt)}</span></div><h2>{formatMathText(selected.stem)}</h2><div className="question-meta"><span>答题 {selected.attempts} 次</span><span>掌握度 {getQuestionMastery(selected)}%</span><span>下次复习 {formatReviewDate(selected.nextReviewAt)}</span></div>{selected.photo ? <div className="photo-preview"><img src={selected.photo} alt="错题照片" /></div> : null}{renderAnswerPanel()}</> : <div className="detail-empty"><div>✦</div><h2>选一道题开始复盘</h2><p>每一次理解错误，都会让下一次更稳。</p></div>}</article>
+            </div>
+          )}
+          {view === "review" && selected && <div className="question-tools"><button onClick={openEditQuestion}>编辑错题</button><button onClick={deleteQuestion}>删除当前错题</button></div>}
+          {view === "review" && selected && <section className="practice-banner"><div className="practice-shape">✦</div><div><p className="eyebrow">举一反三</p><h2>真的掌握了吗？</h2><p>请选择题目来源，系统会明确标注，避免混淆。</p></div><div className="practice-actions"><button className="primary" onClick={generatePractice}>题库抽取 3 道</button><button className="primary secondary" disabled={aiBusy} onClick={() => void generateAiPractice()}>{aiReady ? "AI 生成 3 道" : "加载 AI 后生成"}</button></div></section>}
         </div>
       </section>
-      {toast && <div className="toast">{toast}</div>}
+      {mobilePanel ? <button className="mobile-sheet-backdrop" aria-label="关闭面板" onClick={() => setMobilePanel(null)} /> : null}
+      {mobilePanel === "subjects" ? <section className="mobile-sheet" aria-label="切换学科"><div className="mobile-sheet-head"><h2>切换学科</h2><button aria-label="关闭" onClick={() => setMobilePanel(null)}>×</button></div><div className="mobile-subject-list">{notebooks.map((book) => <button className={book.id === activeId ? "active" : ""} key={book.id} onClick={() => selectNotebook(book)}><i className={`dot ${book.color}`} /><span>{book.name}</span><em>{book.questions.length}</em></button>)}</div><div className="new-book"><input value={newBook} onChange={(event) => setNewBook(event.target.value)} placeholder="新建题库…" /><button onClick={createNotebook}>创建</button></div></section> : null}
+      {mobilePanel === "settings" ? <section className="mobile-sheet" aria-label="设置"><div className="mobile-sheet-head"><h2>设置</h2><button aria-label="关闭" onClick={() => setMobilePanel(null)}>×</button></div><div className="mobile-settings-actions"><button onClick={() => importInputRef.current?.click()}>导入 JSON</button><button onClick={exportData}>导出 JSON</button><button onClick={resetData}>恢复初始数据</button>{aiReady ? <button onClick={() => void clearAiModel()}>清理本机 AI</button> : <button disabled={aiCompatible !== true} onClick={startAiLoad}>下载本机 AI</button>}</div><p>数据保存在当前设备。导入兼容旧版 wrongbook-data。</p></section> : null}
+      <nav className="mobile-nav" aria-label="手机端主导航"><button onClick={() => setMobilePanel(mobilePanel === "subjects" ? null : "subjects")}><span>▦</span>学科</button><button className={view === "review" ? "active" : ""} onClick={() => { setView("review"); setReviewTodayOnly(false); setMobilePanel(null); }}><span>✓</span>复习</button><button className={view === "add" ? "active" : ""} onClick={openAddView}><span>＋</span>添加</button><button onClick={() => setMobilePanel(mobilePanel === "settings" ? null : "settings")}><span>⚙</span>设置</button></nav>
+      {toast && <div className="toast">{toast}{lastDeleted ? <button onClick={undoDelete}>撤销</button> : null}</div>}
     </main>
   );
 }
