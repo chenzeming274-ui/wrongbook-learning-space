@@ -1,23 +1,15 @@
-import { LoggerWithoutDebug, Wllama } from "@wllama/wllama";
+import { CreateMLCEngine, type MLCEngine } from "@mlc-ai/web-llm";
 
-// @wllama/wllama 3.5.1 publishes the CDN declaration but omits its JS file,
-// so keep the equivalent official CDN path inline.
-const WasmFromCDN = {
-  default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.5.1/src/wasm/wllama.wasm",
-};
-
-/** Exact GGUF requested by the user. It is downloaded once and cached by Wllama. */
-export const LOCAL_AI_MODEL =
-  "DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf";
-const LOCAL_AI_MODEL_URL =
-  "https://huggingface.co/second-state/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q2_K.gguf?download=true";
+/** Browser-native, Chinese-capable high-performance model. Downloads in-page once, then is cached. */
+export const LOCAL_AI_MODEL = "Qwen3-8B";
+const LOCAL_AI_MODEL_ID = "Qwen3-8B-q4f16_1-MLC";
 
 export type InitProgressReport = { progress: number; text: string };
 type ProgressListener = (report: InitProgressReport) => void;
 export type LocalAIMessage = { role: "user" | "assistant"; content: string };
 
-let engine: Wllama | null = null;
-let enginePromise: Promise<Wllama> | null = null;
+let engine: MLCEngine | null = null;
+let enginePromise: Promise<MLCEngine> | null = null;
 const progressListeners = new Set<ProgressListener>();
 
 function broadcastProgress(progress: number, text: string) {
@@ -26,46 +18,34 @@ function broadcastProgress(progress: number, text: string) {
 }
 
 export function supportsLocalAI() {
-  return typeof navigator !== "undefined" && typeof WebAssembly !== "undefined";
+  return typeof navigator !== "undefined" && typeof WebAssembly !== "undefined" && "gpu" in navigator;
 }
 
 export async function loadLocalAI(onProgress?: ProgressListener) {
   if (!supportsLocalAI()) {
-    throw new Error("当前浏览器不支持 WebAssembly，请使用新版 Chrome、Edge 或 Safari。");
+    throw new Error("此浏览器未开启 WebGPU。请使用最新版 Safari 或 Chrome。");
   }
 
   if (onProgress) progressListeners.add(onProgress);
   try {
     if (engine) return engine;
-
     if (!enginePromise) {
-      enginePromise = (async () => {
-        const createdEngine = new Wllama(WasmFromCDN, {
-          logger: LoggerWithoutDebug,
-          parallelDownloads: 3,
-          allowOffline: true,
+      enginePromise = CreateMLCEngine(LOCAL_AI_MODEL_ID, {
+        initProgressCallback: (report) => {
+          broadcastProgress(report.progress, report.text || `正在安装 AI… ${Math.round(report.progress * 100)}%`);
+        },
+      })
+        .then((createdEngine) => {
+          engine = createdEngine;
+          broadcastProgress(1, "AI 已安装，可离线使用");
+          return createdEngine;
+        })
+        .catch((error) => {
+          enginePromise = null;
+          engine = null;
+          throw error;
         });
-        await createdEngine.loadModelFromUrl(LOCAL_AI_MODEL_URL, {
-          n_ctx: 4096,
-          n_threads: 2,
-          n_gpu_layers: 0,
-          reasoning: true,
-          reasoning_format: "deepseek",
-          progressCallback: ({ loaded, total }) => {
-            const progress = total > 0 ? loaded / total : 0;
-            broadcastProgress(progress, `正在下载离线模型… ${Math.round(progress * 100)}%`);
-          },
-        });
-        engine = createdEngine;
-        broadcastProgress(1, "离线模型已准备完成");
-        return createdEngine;
-      })().catch((error) => {
-        enginePromise = null;
-        engine = null;
-        throw error;
-      });
     }
-
     return await enginePromise;
   } finally {
     if (onProgress) progressListeners.delete(onProgress);
@@ -74,7 +54,8 @@ export async function loadLocalAI(onProgress?: ProgressListener) {
 
 export async function askLocalAI(question: string, history: LocalAIMessage[] = []) {
   const localEngine = await loadLocalAI();
-  const response = await localEngine.createChatCompletion({
+  const response = await localEngine.chat.completions.create({
+    model: LOCAL_AI_MODEL_ID,
     messages: [
       {
         role: "system",
