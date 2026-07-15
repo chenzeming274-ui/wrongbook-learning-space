@@ -33,6 +33,7 @@ export function sanitizeAIText(value: string) {
     .replace(/\\times/g, "×")
     .replace(/\\div/g, "÷")
     .replace(/\\([a-zA-Z]+)/g, "$1")
+    .replace(/\\/g, "")
     .replace(/[{}]/g, "")
     .replace(/\s+/g, " ")
     .replace(/\(\s+/g, "(")

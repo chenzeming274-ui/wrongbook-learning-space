@@ -142,7 +142,13 @@ export default function Home() {
     }
     const savedAiHistory = localStorage.getItem("wrongbook-ai-history");
     if (savedAiHistory) {
-      try { setAiHistory(JSON.parse(savedAiHistory).slice(-20)); } catch { localStorage.removeItem("wrongbook-ai-history"); }
+      try {
+        const parsed = JSON.parse(savedAiHistory) as LocalAIMessage[];
+        setAiHistory(parsed.slice(-20).map((message) => ({
+          ...message,
+          content: message.role === "assistant" ? sanitizeAIText(message.content) : message.content,
+        })));
+      } catch { localStorage.removeItem("wrongbook-ai-history"); }
     }
     if (localStorage.getItem("wrongbook-ai-cleared") === "1") setAiWasCleared(true);
     setLoaded(true);
