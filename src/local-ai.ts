@@ -91,7 +91,7 @@ export async function askLocalAI(question: string, history: LocalAIMessage[] = [
   const response = await localEngine.chat.completions.create({
     model: activeModelId,
     messages: [
-      { role: "system", content: "你是错题本中的本地学习助手。不要主动提及底层模型的名称、厂商、参数或技术实现，也不要用模型名称介绍自己。请耐心、简洁地直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。公式请直接用自然数学表达，不要输出 LaTeX 命令、反斜杠或花括号；例如把 f'(x) = \\frac{d}{dx}\\left(\\frac{1}{2}x^2 - 3x + 4\\right) 写成 f'(x) = d/dx(1/2x² - 3x + 4)。无法确定时要明确说明，不要编造。" },
+      { role: "system", content: "你是错题本中的本地学习助手。不要主动提及底层模型的名称、厂商、参数或技术实现，也不要用模型名称介绍自己。请耐心、简洁地直接回答学生的问题；涉及解题时，先给思路，再分步骤说明，最后给结论。公式必须直接写成普通可读文本，不要输出 LaTeX、反斜杠、花括号、代码块或多层括号；例如把 f'(x)=\\frac{d}{dx}\\left(\\frac{1}{2}x^2-3x+4\\right) 写成 f'(x)=d/dx(1/2x²-3x+4)。如果需要表示分数，直接写 a/b；如果需要表示平方，直接写 x²。无法确定时要明确说明，不要编造。" },
       ...history,
       { role: "user", content: question },
     ],
