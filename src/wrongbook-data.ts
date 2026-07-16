@@ -186,6 +186,18 @@ export function migrateNotebooks(value: unknown): Notebook[] {
     }));
 }
 
+/** Keep at most one stored image across the whole wrongbook. */
+export function enforceLatestPhoto(notebooks: Notebook[], preferred?: { notebookId: string; questionId: string }) {
+  const migrated = migrateNotebooks(notebooks);
+  const pictured = migrated.flatMap((book) => book.questions.filter((question) => Boolean(question.photo)).map((question) => ({ notebookId: book.id, question })));
+  const preferredPhoto = preferred ? pictured.find((item) => item.notebookId === preferred.notebookId && item.question.id === preferred.questionId) : undefined;
+  const keep = preferredPhoto ?? pictured.reduce<(typeof pictured)[number] | undefined>((latest, item) => {
+    if (!latest) return item;
+    return Date.parse(item.question.createdAt) >= Date.parse(latest.question.createdAt) ? item : latest;
+  }, undefined);
+  return migrated.map((book) => ({ ...book, questions: book.questions.map((question) => book.id === keep?.notebookId && question.id === keep.question.id ? question : { ...question, photo: undefined }) }));
+}
+
 /** Percentage of correct attempts. A manually mastered question is 100%. */
 export function calculateMastery(attempts: number, correctAttempts: number, mastered = false) {
   if (mastered) return 100;

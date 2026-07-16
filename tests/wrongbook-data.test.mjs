@@ -77,3 +77,12 @@ test("merges notebooks and skips duplicate questions without deleting local data
   assert.equal(new Set(merged[0].questions.map((question) => question.id)).size, 2);
   assert.equal(merged[1].name, "英语");
 });
+
+test("keeps only the latest photo and honors a newly saved preferred question", () => {
+  const books = data.migrateNotebooks([{ name: "数学", questions: [
+    { id: "old", stem: "旧题", answer: "1", photo: "old", createdAt: "2026-01-01" },
+    { id: "new", stem: "新题", answer: "2", photo: "new", createdAt: "2026-02-01" },
+  ] }]);
+  assert.deepEqual(data.enforceLatestPhoto(books)[0].questions.map((q) => q.photo), [undefined, "new"]);
+  assert.deepEqual(data.enforceLatestPhoto(books, { notebookId: books[0].id, questionId: "old" })[0].questions.map((q) => q.photo), ["old", undefined]);
+});

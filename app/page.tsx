@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAnswerCorrect } from "../src/answer-utils";
 import { compressImage } from "../src/image-utils";
 import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
-import { calculateMastery, calculateNextReviewAt, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
+import { calculateMastery, calculateNextReviewAt, enforceLatestPhoto, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
 
 const seedQuestion: WrongQuestion = {
   id: "q-1",
@@ -155,15 +155,17 @@ export default function Home() {
   const [photoFeedback, setPhotoFeedback] = useState("");
   const [importFeedback, setImportFeedback] = useState("");
   const [pendingImport, setPendingImport] = useState<{ notebooks: Notebook[]; fileName: string } | null>(null);
+  const [searchShortcut, setSearchShortcut] = useState("⌘ / Ctrl K");
   const importInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const saved = localStorage.getItem("wrongbook-data");
       if (saved) {
         try {
-          const migrated = migrateNotebooks(JSON.parse(saved));
+          const migrated = enforceLatestPhoto(migrateNotebooks(JSON.parse(saved)));
           if (migrated.length) {
             setNotebooks(migrated);
             setActiveId(migrated[0].id);
@@ -223,8 +225,22 @@ export default function Home() {
   const stats = useMemo(() => getReviewStats(notebooks), [notebooks]);
   const activeStats = useMemo(() => getReviewStats(active ? [active] : []), [active]);
   useEffect(() => {
-    const timer = window.setTimeout(() => setAiCompatible(supportsLocalAI() && window.isSecureContext), 0);
+    const timer = window.setTimeout(() => {
+      setAiCompatible(supportsLocalAI() && window.isSecureContext);
+      setSearchShortcut(/Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? "⌘ K" : "Ctrl K");
+    }, 0);
     return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey) || event.altKey || window.matchMedia("(max-width: 650px)").matches) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
   }, []);
 
   useEffect(() => {
@@ -468,7 +484,7 @@ export default function Home() {
       return;
     }
     if (editingQuestionId) {
-      setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((question) => question.id === editingQuestionId ? { ...question, stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), photo: nextDraft.photo || undefined, source: usedAI || draftUsedAI ? "ai" : question.source } : question) } : book));
+      setNotebooks((books) => enforceLatestPhoto(books.map((book) => book.id === activeId ? { ...book, questions: book.questions.map((question) => question.id === editingQuestionId ? { ...question, stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), photo: nextDraft.photo || undefined, source: usedAI || draftUsedAI ? "ai" : question.source } : question) } : book), nextDraft.photo ? { notebookId: activeId, questionId: editingQuestionId } : undefined));
       setSelectedId(editingQuestionId);
       setEditingQuestionId("");
       setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
@@ -478,7 +494,7 @@ export default function Home() {
       return;
     }
     const question: WrongQuestion = { stem: nextDraft.stem.trim(), answer: nextDraft.answer.trim(), explanation: nextDraft.explanation.trim(), type: nextDraft.type.trim(), ...(nextDraft.photo ? { photo: nextDraft.photo } : {}), id: uid(), createdAt: new Date().toISOString(), mastered: false, source: usedAI || draftUsedAI ? "ai" : "manual", attempts: 0, correctAttempts: 0, mastery: 0 };
-    setNotebooks((books) => books.map((book) => book.id === activeId ? { ...book, questions: [question, ...book.questions] } : book));
+    setNotebooks((books) => enforceLatestPhoto(books.map((book) => book.id === activeId ? { ...book, questions: [question, ...book.questions] } : book), question.photo ? { notebookId: activeId, questionId: question.id } : undefined));
     setSelectedId(question.id); setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" }); setDraftUsedAI(false); setView("review"); notify("错题已保存");
   }
 
@@ -620,7 +636,7 @@ export default function Home() {
 
   function applyImport(mode: "merge" | "replace") {
     if (!pendingImport) return;
-    const next = mode === "merge" ? mergeNotebooks(notebooks, pendingImport.notebooks) : pendingImport.notebooks;
+    const next = enforceLatestPhoto(mode === "merge" ? mergeNotebooks(notebooks, pendingImport.notebooks) : pendingImport.notebooks);
     setNotebooks(next);
     setActiveId(next[0].id);
     setSelectedId(next[0].questions[0]?.id || "");
@@ -675,7 +691,7 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar"><div className="breadcrumb">我的题库 <span>/</span> <strong>{active?.name || "未命名题库"}</strong></div><div className="top-actions"><label className="search"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索错题或知识点" /><kbd>⌘ K</kbd></label><button className="icon-button" aria-label="通知">♧</button><button className="avatar">学</button></div></header>
+        <header className="topbar"><div className="breadcrumb">我的题库 <span>/</span> <strong>{active?.name || "未命名题库"}</strong></div><div className="top-actions"><label className="search"><span>⌕</span><input ref={searchInputRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索错题或知识点" /><kbd>{searchShortcut}</kbd></label><button className="icon-button" aria-label="通知">♧</button><button className="avatar">学</button></div></header>
         <div className="content">
           <div className="page-heading"><div><p className="eyebrow">学习进度 <span>·</span> {active?.name}</p><h1>把错题变成<br /><i>下一次的得分</i></h1><p className="subheading">理解错误、掌握方法，再用三道新题确认真的学会。</p></div><div className="progress-card"><div className="ring"><span>{activeStats.mastery}</span><small>%</small></div><div><strong>掌握度</strong><span>{activeStats.correctAttempts} 次答对 · {activeStats.attempts} 次作答</span></div></div></div>
           <div className="review-summary"><button className="review-stat" onClick={() => { setView("review"); setReviewTodayOnly(true); }}><strong>{activeStats.dueToday}</strong><span>今日复习</span></button><div className="review-stat"><strong>{activeStats.attempts}</strong><span>答题次数</span></div><div className="review-stat"><strong>{activeStats.mastery}%</strong><span>掌握度</span></div><div className="review-stat"><strong>{stats.totalQuestions}</strong><span>全部错题</span></div></div>
@@ -684,7 +700,7 @@ export default function Home() {
             <div className="ai-search-head"><div><span className="ai-kicker">本机 AI · 点击加载</span><strong>{aiReady ? "问问你的错题助手" : aiLoadError ? "AI 模型未能加载" : aiLoadRequested ? "正在加载 AI 模型" : "需要时再启用，不占用启动流量"}</strong></div><span className="ai-status">{aiReady ? "已就绪" : aiLoadError ? "加载失败" : aiLoadRequested ? `${aiProgress}%` : "未加载"}</span></div>
             {!aiLoadRequested && !aiReady ? <div className="ai-idle"><div className={`ai-compatibility ${aiCompatible === null ? "checking" : aiCompatible ? "compatible" : "incompatible"}`}><strong>{aiCompatible === null ? "正在检查浏览器兼容性" : aiCompatible ? "此浏览器支持本机 AI" : "当前浏览器不支持本机 AI"}</strong><span>{aiCompatible === null ? "检查 WebGPU 和安全连接…" : aiCompatible ? "支持 WebGPU 且处于安全连接；模型只保存在本机浏览器。" : "需要支持 WebGPU 的新版 Safari 或 Chrome，并使用 HTTPS。"}</span></div><button className="ai-load-button" disabled={aiCompatible !== true} onClick={startAiLoad}>下载并启用 AI</button></div> : <><div className="ai-progress-track" role="progressbar" aria-label="AI 模型加载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={aiProgress}><div className="ai-progress-fill" style={{ width: `${aiProgress}%` }} /></div>{!aiReady && aiProgressText ? <div className="ai-progress-text">{aiProgressText}</div> : null}</>}
             {aiLoadError ? <div className="ai-error" role="alert"><span>{aiLoadError}</span><button onClick={retryAiLoad}>重新加载</button></div> : null}
-          {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div><div className={`ai-upgrade ${upgradeBusy ? "loading" : ""}`}><span>{aiUpgraded ? "已使用高性能 AI" : upgradeBusy ? `正在下载并升级… ${Math.max(0, upgradeProgress)}%` : upgradeProgress < 0 ? "升级失败，可重新尝试" : "需要更强能力时再主动升级"}</span>{!aiUpgraded ? <button onClick={upgradeAiModel} disabled={upgradeBusy}>{upgradeBusy ? "升级中…" : upgradeProgress < 0 ? "重新升级" : "下载并升级"}</button> : null}</div><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{!aiBusy && !aiHistory.length ? <div className="ai-empty">AI 已就绪。输入知识点或一道题开始提问。</div> : null}{aiHistory.length ? <><div className="ai-chat-history" aria-live="polite">{(showAiHistory ? aiHistory : aiHistory.slice(-2)).map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{formatMathText(message.content)}</p></div>)}</div>{aiHistory.length > 2 ? <button className="ai-history-toggle" onClick={() => setShowAiHistory((value) => !value)}>{showAiHistory ? "收起前九轮" : "显示前九轮对话"}</button> : null}</> : null}</> : null}
+          {aiReady ? <><div className="ai-memory-note">已记住最近 10 轮对话，超过后自动删除最早一轮 <button className="ai-clear" disabled={aiClearing} onClick={clearAiModel}>{aiClearing ? "正在清理…" : "清理本机 AI"}</button></div><div className={`ai-upgrade ${upgradeBusy ? "loading" : ""}`}><span>{aiUpgraded ? "已使用增强版本地 AI" : upgradeBusy ? `正在下载增强版本地 AI… ${Math.max(0, upgradeProgress)}%` : upgradeProgress < 0 ? "增强版本地 AI 升级失败，可重试" : "需要更强能力时可升级为增强版本地 AI"}</span>{!aiUpgraded ? <button onClick={upgradeAiModel} disabled={upgradeBusy}>{upgradeBusy ? "升级中…" : upgradeProgress < 0 ? "重新升级" : "下载并升级"}</button> : null}</div><p className="ai-warning">AI 内容可能有误，请核对答案和解析。</p><div className="ai-search-row"><input id="ai-search" value={aiQuery} onChange={(e) => setAiQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runAiSearch()} placeholder="输入知识点或学习问题…" /><button disabled={!aiQuery.trim() || aiBusy} onClick={runAiSearch}>{aiBusy ? "思考中…" : "搜索"}</button></div>{aiBusy ? <div className="ai-answer" aria-live="polite">正在本机生成回答…</div> : null}{!aiBusy && !aiHistory.length ? <div className="ai-empty">AI 已就绪。输入知识点或一道题开始提问。</div> : null}{aiHistory.length ? <><div className="ai-chat-history" aria-live="polite">{(showAiHistory ? aiHistory : aiHistory.slice(-2)).map((message, index) => <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === "user" ? "你" : "学习助手"}</span><p>{formatMathText(message.content)}</p></div>)}</div>{aiHistory.length > 2 ? <button className="ai-history-toggle" onClick={() => setShowAiHistory((value) => !value)}>{showAiHistory ? "收起前九轮" : "显示前九轮对话"}</button> : null}</> : null}</> : null}
           </section>
 
           {view === "add" ? (

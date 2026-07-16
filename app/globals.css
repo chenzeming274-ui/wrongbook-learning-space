@@ -191,3 +191,14 @@ button:disabled { cursor:not-allowed; }
   .import-choice.primary-choice { border-color:#5c548a; background:#282344; }
   .ai-upgrade.loading { background:linear-gradient(90deg,#282344 0%,#34304d 48%,#282344 100%); background-size:220% 100%; }
 }
+
+/* Frequently read and tapped text only; decorative labels keep their scale. */
+.search input,.sidebar .new-book input { font-size:14px; }
+.sidebar .new-book button,.data-actions button { font-size:13px; white-space:nowrap; }
+.side-link em,.book-link em,.progress-card span,.ai-status,.ai-error,.ai-compatibility,.import-choice span { font-size:12px; }
+.content button { font-size:13px; }
+.content .ai-message p { font-size:14px; line-height:1.6; }
+.ai-warning { margin:9px 0 0; color:#a06b42; font-size:12px; line-height:1.5; }
+.search kbd,.ai-upgrade button,.ai-clear { white-space:nowrap; }
+@media (max-width:650px) { .mobile-nav button { font-size:13px; } }
+@media (prefers-color-scheme:dark) { .ai-warning { color:#d3a477; } }
