@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isAnswerCorrect } from "../src/answer-utils";
 import { compressImage } from "../src/image-utils";
+import { recognizeWrongQuestionImage } from "../src/local-ocr";
 import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
+import { buildQuestionAutofillPrompt, parseQuestionAutofill } from "../src/question-autofill";
 import { calculateMastery, calculateNextReviewAt, enforceLatestPhoto, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
 
 const seedQuestion: WrongQuestion = {
@@ -152,6 +154,7 @@ export default function Home() {
   const [mobilePanel, setMobilePanel] = useState<"subjects" | "settings" | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoProgress, setPhotoProgress] = useState(0);
   const [photoFeedback, setPhotoFeedback] = useState("");
   const [importFeedback, setImportFeedback] = useState("");
   const [pendingImport, setPendingImport] = useState<{ notebooks: Notebook[]; fileName: string } | null>(null);
@@ -353,13 +356,48 @@ export default function Home() {
     if (!file || photoBusy) return;
     const replacing = Boolean(draft.photo);
     setPhotoBusy(true);
+    setPhotoProgress(0);
     setPhotoFeedback("正在压缩图片…");
     try {
       const compressed = await compressImage(file);
-      setDraft((current) => ({ ...current, photo: compressed.dataUrl, photoHint: current.photoHint || file.name }));
-      setPhotoFeedback(`${replacing ? "已替换上一张图片" : "图片已压缩"} · ${compressed.width}×${compressed.height} · ${Math.max(1, Math.round(compressed.bytes / 1024))}KB`);
+      const baseDraft = { ...draft, photo: compressed.dataUrl, photoHint: draft.photoHint || file.name };
+      setDraft(baseDraft);
+      setPhotoFeedback("图片已保存，正在本机识别文字…");
+      const recognizedText = await recognizeWrongQuestionImage(compressed.dataUrl, (report) => {
+        setPhotoProgress(Math.round(report.progress * 100));
+        setPhotoFeedback(`${report.text} ${Math.round(report.progress * 100)}%`);
+      });
+      const recognizedDraft = { ...baseDraft, stem: baseDraft.stem || recognizedText };
+      setDraft(recognizedDraft);
+
+      if (!supportsLocalAI() || !window.isSecureContext) {
+        setPhotoFeedback("文字已填入题目；当前浏览器无法运行离线 AI，请手动核对其余内容。");
+        return;
+      }
+
+      setAiLoadRequested(true);
+      setAiLoadError("");
+      setPhotoFeedback("文字识别完成，正在准备离线 AI 自动补全…");
+      await loadLocalAI((report) => {
+        setAiProgress(Math.round(report.progress * 100));
+        setAiProgressText(report.text);
+        setPhotoFeedback(`正在准备离线 AI… ${Math.round(report.progress * 100)}%`);
+      });
+      setAiReady(true);
+      const raw = await askLocalAI(buildQuestionAutofillPrompt({ ...recognizedDraft, recognizedText }), aiHistory, { raw: true });
+      const filled = parseQuestionAutofill(raw);
+      setDraft((current) => ({
+        ...current,
+        stem: filled.stem || recognizedDraft.stem,
+        type: filled.type || recognizedDraft.type,
+        answer: filled.answer || recognizedDraft.answer,
+        explanation: filled.explanation || recognizedDraft.explanation,
+      }));
+      setDraftUsedAI(true);
+      setPhotoProgress(100);
+      setPhotoFeedback(`${replacing ? "新图已替换旧图" : "照片已识别"}，题目、题型、答案和解析已自动填写，请核对。`);
     } catch (error) {
-      setPhotoFeedback(error instanceof Error ? error.message : "图片处理失败，请换一张重试。");
+      setPhotoFeedback(error instanceof Error ? `${error.message} 已保留图片和已识别内容。` : "自动识别失败，已保留图片和已有内容。");
     } finally {
       setPhotoBusy(false);
       if (photoInputRef.current) photoInputRef.current.value = "";
@@ -377,17 +415,11 @@ export default function Home() {
       notify("本机 AI 还没准备好");
       return;
     }
-    const prompt = `请根据以下录入信息补全一条错题记录，只输出 JSON，不要输出多余文字。字段必须包含 stem、type、answer、explanation、photoCaption。若某项已有内容就保留；若缺失就补全。题目可以适当规范化，不要输出 LaTeX。已知信息如下：
-题目：${draft.stem || "未填写"}
-题型：${draft.type || "未填写"}
-答案：${draft.answer || "未填写"}
-解析：${draft.explanation || "未填写"}
-拍照备注：${draft.photoHint || "未填写"}`;
+    const prompt = buildQuestionAutofillPrompt(draft);
     setAiBusy(true);
     try {
       const raw = await askLocalAI(prompt, aiHistory, { raw: true });
-      const text = raw.replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/, "").trim();
-      const parsed = JSON.parse(text) as Partial<DraftQuestion & { photoCaption?: string }>;
+      const parsed = parseQuestionAutofill(raw);
       setDraft((current) => ({
         stem: parsed.stem?.trim() || current.stem,
         type: parsed.type?.trim() || current.type,
@@ -451,16 +483,9 @@ export default function Home() {
         return;
       }
       try {
-        const prompt = `请根据以下录入信息补全一条错题记录，只输出 JSON，不要输出多余文字。字段必须包含 stem、type、answer、explanation。若某项已有内容就保留；若缺失就补全。题目不要输出 LaTeX。已知信息如下：
-题目：${draft.stem || "未填写"}
-题型：${draft.type || "未填写"}
-答案：${draft.answer || "未填写"}
-解析：${draft.explanation || "未填写"}
-拍照备注：${draft.photoHint || "未填写"}`;
         setAiBusy(true);
-        const raw = await askLocalAI(prompt, aiHistory, { raw: true });
-        const text = raw.replace(/^```json\s*/i, "").replace(/^```/i, "").replace(/```$/, "").trim();
-        const parsed = JSON.parse(text) as Partial<DraftQuestion>;
+        const raw = await askLocalAI(buildQuestionAutofillPrompt(draft), aiHistory, { raw: true });
+        const parsed = parseQuestionAutofill(raw);
         nextDraft = {
           stem: parsed.stem?.trim() || draft.stem,
           type: parsed.type?.trim() || draft.type,
@@ -706,8 +731,9 @@ export default function Home() {
           {view === "add" ? (
             <section className="add-card">
               <div className="card-title"><div><p className="eyebrow">{editingQuestionId ? "编辑错题" : "记录一次错误"}</p><h2>{editingQuestionId ? "修改题目内容" : "把题目放进来"}</h2></div><span className="step-badge">保存到「{active?.name}」</span></div>
-              <label>拍照录入（自动压缩，原图最大 12MB）<input ref={photoInputRef} className="photo-input" type="file" accept="image/*" capture="environment" disabled={photoBusy} onChange={(e) => void handlePhotoUpload(e.target.files?.[0])} /></label>
+              <label>拍照识别并自动填写（本机处理，原图最大 12MB）<input ref={photoInputRef} className="photo-input" type="file" accept="image/*" capture="environment" disabled={photoBusy} onChange={(e) => void handlePhotoUpload(e.target.files?.[0])} /></label>
               {photoFeedback ? <div className={`photo-feedback ${photoFeedback.includes("失败") || photoFeedback.includes("超过") || photoFeedback.includes("无法") ? "error" : ""}`} role="status">{photoFeedback}</div> : null}
+              {photoBusy ? <div className="photo-recognition-progress" role="progressbar" aria-label="照片识别进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={photoProgress}><span style={{ width: `${photoProgress}%` }} /></div> : null}
               {draft.photo ? <div className="photo-preview editing"><img src={draft.photo} alt="错题照片预览" /><div className="photo-actions"><button onClick={() => photoInputRef.current?.click()} disabled={photoBusy}>{photoBusy ? "处理中…" : "替换图片"}</button><button className="danger" onClick={removeDraftPhoto}>删除图片</button></div></div> : photoBusy ? <div className="photo-loading" aria-live="polite">正在读取并压缩图片，请稍候…</div> : null}
               <div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>拍照参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div>
               <div className="form-grid"><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="输入题目内容" /></label><label>正确答案（多个答案可用 | 或换行）<textarea className="short" value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="例如：0.5 | 1/2" /></label></div>
