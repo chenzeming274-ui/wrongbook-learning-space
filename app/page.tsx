@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAnswerCorrect } from "../src/answer-utils";
 import { compressImage } from "../src/image-utils";
 import { recognizeWrongQuestionImage } from "../src/local-ocr";
+import { extractWrongQuestionPDF } from "../src/local-pdf";
 import { askLocalAI, clearLocalAI, getCachedLocalAIState, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
 import { buildQuestionAutofillPrompt, parseQuestionAutofill } from "../src/question-autofill";
 import { calculateMastery, calculateNextReviewAt, enforceLatestPhoto, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
@@ -162,6 +163,7 @@ export default function Home() {
   const [searchShortcut, setSearchShortcut] = useState("⌘ / Ctrl K");
   const importInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const upgradeRestoreStartedRef = useRef(false);
 
@@ -382,7 +384,41 @@ export default function Home() {
     setDraft({ stem: "", answer: "", explanation: "", type: "", photo: "", photoHint: "" });
     setPhotoFeedback("");
     if (photoInputRef.current) photoInputRef.current.value = "";
+    if (pdfInputRef.current) pdfInputRef.current.value = "";
     setView("add");
+  }
+
+  async function autofillRecognizedQuestion(recognizedText: string, baseDraft: DraftQuestion, completedLabel: string) {
+    const recognizedDraft = { ...baseDraft, stem: baseDraft.stem || recognizedText };
+    setDraft(recognizedDraft);
+
+    if (!supportsLocalAI() || !window.isSecureContext) {
+      setPhotoFeedback("文字已填入题目；当前浏览器无法运行离线 AI，请手动核对其余内容。");
+      return;
+    }
+
+    setAiLoadRequested(true);
+    setAiLoadError("");
+    setPhotoFeedback("文字识别完成，正在准备离线 AI 自动补全…");
+    await loadLocalAI((report) => {
+      setAiProgress(Math.round(report.progress * 100));
+      setAiProgressText(report.text);
+      setPhotoFeedback(`正在准备离线 AI… ${Math.round(report.progress * 100)}%`);
+    });
+    setAiReady(true);
+    localStorage.setItem("wrongbook-ai-installed", "1");
+    const raw = await askLocalAI(buildQuestionAutofillPrompt({ ...recognizedDraft, recognizedText }), aiHistory, { raw: true });
+    const filled = parseQuestionAutofill(raw);
+    setDraft((current) => ({
+      ...current,
+      stem: filled.stem || recognizedDraft.stem,
+      type: filled.type || recognizedDraft.type,
+      answer: filled.answer || recognizedDraft.answer,
+      explanation: filled.explanation || recognizedDraft.explanation,
+    }));
+    setDraftUsedAI(true);
+    setPhotoProgress(100);
+    setPhotoFeedback(`${completedLabel}，题目、题型、答案和解析已自动填写，请核对。`);
   }
 
   async function handlePhotoUpload(file?: File) {
@@ -400,41 +436,32 @@ export default function Home() {
         setPhotoProgress(Math.round(report.progress * 100));
         setPhotoFeedback(`${report.text} ${Math.round(report.progress * 100)}%`);
       });
-      const recognizedDraft = { ...baseDraft, stem: baseDraft.stem || recognizedText };
-      setDraft(recognizedDraft);
-
-      if (!supportsLocalAI() || !window.isSecureContext) {
-        setPhotoFeedback("文字已填入题目；当前浏览器无法运行离线 AI，请手动核对其余内容。");
-        return;
-      }
-
-      setAiLoadRequested(true);
-      setAiLoadError("");
-      setPhotoFeedback("文字识别完成，正在准备离线 AI 自动补全…");
-      await loadLocalAI((report) => {
-        setAiProgress(Math.round(report.progress * 100));
-        setAiProgressText(report.text);
-        setPhotoFeedback(`正在准备离线 AI… ${Math.round(report.progress * 100)}%`);
-      });
-      setAiReady(true);
-      localStorage.setItem("wrongbook-ai-installed", "1");
-      const raw = await askLocalAI(buildQuestionAutofillPrompt({ ...recognizedDraft, recognizedText }), aiHistory, { raw: true });
-      const filled = parseQuestionAutofill(raw);
-      setDraft((current) => ({
-        ...current,
-        stem: filled.stem || recognizedDraft.stem,
-        type: filled.type || recognizedDraft.type,
-        answer: filled.answer || recognizedDraft.answer,
-        explanation: filled.explanation || recognizedDraft.explanation,
-      }));
-      setDraftUsedAI(true);
-      setPhotoProgress(100);
-      setPhotoFeedback(`${replacing ? "新图已替换旧图" : "照片已识别"}，题目、题型、答案和解析已自动填写，请核对。`);
+      await autofillRecognizedQuestion(recognizedText, baseDraft, replacing ? "新图已替换旧图" : "照片已识别");
     } catch (error) {
       setPhotoFeedback(error instanceof Error ? `${error.message} 已保留图片和已识别内容。` : "自动识别失败，已保留图片和已有内容。");
     } finally {
       setPhotoBusy(false);
       if (photoInputRef.current) photoInputRef.current.value = "";
+    }
+  }
+
+  async function handlePDFUpload(file?: File) {
+    if (!file || photoBusy) return;
+    setPhotoBusy(true);
+    setPhotoProgress(0);
+    setPhotoFeedback("正在读取 PDF…");
+    try {
+      const recognizedText = await extractWrongQuestionPDF(file, (report) => {
+        setPhotoProgress(Math.round(report.progress * 100));
+        setPhotoFeedback(`${report.text} ${Math.round(report.progress * 100)}%`);
+      });
+      const baseDraft = { ...draft, photoHint: draft.photoHint || file.name };
+      await autofillRecognizedQuestion(recognizedText, baseDraft, "PDF 已识别");
+    } catch (error) {
+      setPhotoFeedback(error instanceof Error ? `${error.message} 已保留已有内容。` : "PDF 识别失败，已保留已有内容。");
+    } finally {
+      setPhotoBusy(false);
+      if (pdfInputRef.current) pdfInputRef.current.value = "";
     }
   }
 
@@ -766,10 +793,11 @@ export default function Home() {
             <section className="add-card">
               <div className="card-title"><div><p className="eyebrow">{editingQuestionId ? "编辑错题" : "记录一次错误"}</p><h2>{editingQuestionId ? "修改题目内容" : "把题目放进来"}</h2></div><span className="step-badge">保存到「{active?.name}」</span></div>
               <label>拍照识别并自动填写（本机处理，原图最大 12MB）<input ref={photoInputRef} className="photo-input" type="file" accept="image/*" capture="environment" disabled={photoBusy} onChange={(e) => void handlePhotoUpload(e.target.files?.[0])} /></label>
+              <label>PDF 识别并自动填写（本机处理，最大 20MB）<input ref={pdfInputRef} className="photo-input" type="file" accept="application/pdf,.pdf" disabled={photoBusy} onChange={(e) => void handlePDFUpload(e.target.files?.[0])} /></label>
               {photoFeedback ? <div className={`photo-feedback ${photoFeedback.includes("失败") || photoFeedback.includes("超过") || photoFeedback.includes("无法") ? "error" : ""}`} role="status">{photoFeedback}</div> : null}
               {photoBusy ? <div className="photo-recognition-progress" role="progressbar" aria-label="照片识别进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={photoProgress}><span style={{ width: `${photoProgress}%` }} /></div> : null}
-              {draft.photo ? <div className="photo-preview editing"><img src={draft.photo} alt="错题照片预览" /><div className="photo-actions"><button onClick={() => photoInputRef.current?.click()} disabled={photoBusy}>{photoBusy ? "处理中…" : "替换图片"}</button><button className="danger" onClick={removeDraftPhoto}>删除图片</button></div></div> : photoBusy ? <div className="photo-loading" aria-live="polite">正在读取并压缩图片，请稍候…</div> : null}
-              <div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>拍照参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div>
+              {draft.photo ? <div className="photo-preview editing"><img src={draft.photo} alt="错题照片预览" /><div className="photo-actions"><button onClick={() => photoInputRef.current?.click()} disabled={photoBusy}>{photoBusy ? "处理中…" : "替换图片"}</button><button className="danger" onClick={removeDraftPhoto}>删除图片</button></div></div> : photoBusy ? <div className="photo-loading" aria-live="polite">正在本机读取并识别文件，请稍候…</div> : null}
+              <div className="form-grid"><label>题型 / 知识点<input value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })} placeholder="例如：二次函数" /></label><label>文件参数 / 识别备注<input value={draft.photoHint} onChange={(e) => setDraft({ ...draft, photoHint: e.target.value })} placeholder="例如：第 3 题、求导题、选择题" /></label></div>
               <div className="form-grid"><label>题目内容<textarea value={draft.stem} onChange={(e) => setDraft({ ...draft, stem: e.target.value })} placeholder="输入题目内容" /></label><label>正确答案（多个答案可用 | 或换行）<textarea className="short" value={draft.answer} onChange={(e) => setDraft({ ...draft, answer: e.target.value })} placeholder="例如：0.5 | 1/2" /></label></div>
               <label>解析与反思<textarea className="short" value={draft.explanation} onChange={(e) => setDraft({ ...draft, explanation: e.target.value })} placeholder="写下解法、错误原因或让本机 AI 补全" /></label>
               <div className="form-actions"><button className="ghost" onClick={() => { setEditingQuestionId(""); setDraftUsedAI(false); setView("review"); }}>取消</button><button className="ghost" onClick={() => { if (aiReady) void fillDraftWithAI(); else startAiLoad(); }}>{aiBusy ? "补全中…" : aiReady ? "AI 自动补全" : "加载 AI 后补全"}</button><button className="primary" onClick={() => void addQuestion()}>{editingQuestionId ? "保存修改" : "保存这道错题"} <span>→</span></button></div>
