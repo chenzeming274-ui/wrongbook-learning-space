@@ -1,4 +1,4 @@
-import { CreateMLCEngine, deleteModelAllInfoInCache, type MLCEngine } from "@mlc-ai/web-llm";
+import { CreateMLCEngine, deleteModelAllInfoInCache, hasModelInCache, type MLCEngine } from "@mlc-ai/web-llm";
 
 /** Start quickly with the compact model, then prepare the stronger model in the background. */
 export const LOCAL_AI_MODEL = "Qwen2.5-0.5B-Instruct";
@@ -59,6 +59,19 @@ export function sanitizeAIText(value: string) {
 
 export function supportsLocalAI() {
   return typeof navigator !== "undefined" && typeof WebAssembly !== "undefined" && "gpu" in navigator;
+}
+
+/** Detect existing browser downloads without starting a new download. */
+export async function getCachedLocalAIState() {
+  try {
+    const [base, upgrade] = await Promise.all([
+      hasModelInCache(FAST_MODEL_ID),
+      hasModelInCache(UPGRADE_MODEL_ID),
+    ]);
+    return { base, upgrade };
+  } catch {
+    return { base: false, upgrade: false };
+  }
 }
 
 export async function loadLocalAI(onProgress?: ProgressListener) {

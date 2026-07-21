@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAnswerCorrect } from "../src/answer-utils";
 import { compressImage } from "../src/image-utils";
 import { recognizeWrongQuestionImage } from "../src/local-ocr";
-import { askLocalAI, clearLocalAI, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
+import { askLocalAI, clearLocalAI, getCachedLocalAIState, loadLocalAI, prepareAIUpgrade, sanitizeAIText, supportsLocalAI, upgradeLocalAI, type LocalAIMessage } from "../src/local-ai";
 import { buildQuestionAutofillPrompt, parseQuestionAutofill } from "../src/question-autofill";
 import { calculateMastery, calculateNextReviewAt, enforceLatestPhoto, exportWrongbookJSON, getReviewStats, getQuestionMastery, importWrongbookJSON, isDueToday, mergeNotebooks, migrateNotebooks, recordReview, type Notebook, type WrongQuestion } from "../src/wrongbook-data";
 
@@ -138,6 +138,7 @@ export default function Home() {
   const [upgradeProgress, setUpgradeProgress] = useState(0);
   const [upgradeBusy, setUpgradeBusy] = useState(false);
   const [aiUpgraded, setAiUpgraded] = useState(false);
+  const [restoreUpgrade, setRestoreUpgrade] = useState(false);
   const [aiRetryAttempt, setAiRetryAttempt] = useState(0);
   const [aiLoadRequested, setAiLoadRequested] = useState(false);
   const [aiCompatible, setAiCompatible] = useState<boolean | null>(null);
@@ -162,6 +163,7 @@ export default function Home() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const upgradeRestoreStartedRef = useRef(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -211,6 +213,7 @@ export default function Home() {
         setAiReady(true);
         setAiWasCleared(false);
         localStorage.removeItem("wrongbook-ai-cleared");
+        localStorage.setItem("wrongbook-ai-installed", "1");
         setUpgradeProgress(0);
       })
       .catch((error: unknown) => {
@@ -228,12 +231,37 @@ export default function Home() {
   const stats = useMemo(() => getReviewStats(notebooks), [notebooks]);
   const activeStats = useMemo(() => getReviewStats(active ? [active] : []), [active]);
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setAiCompatible(supportsLocalAI() && window.isSecureContext);
+    const timer = window.setTimeout(async () => {
+      const compatible = supportsLocalAI() && window.isSecureContext;
+      setAiCompatible(compatible);
       setSearchShortcut(/Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? "⌘ K" : "Ctrl K");
+      if (!compatible) return;
+      const cached = await getCachedLocalAIState();
+      if (!cached.base && !cached.upgrade) return;
+      setRestoreUpgrade(cached.upgrade);
+      setAiProgressText("正在从本机缓存恢复 AI…");
+      setAiLoadRequested(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    if (!aiReady || !restoreUpgrade || upgradeRestoreStartedRef.current) return;
+    upgradeRestoreStartedRef.current = true;
+    setUpgradeBusy(true);
+    prepareAIUpgrade((report) => setUpgradeProgress(Math.round(report.progress * 100)))
+      .then(() => upgradeLocalAI())
+      .then(() => {
+        setUpgradeProgress(100);
+        setAiUpgraded(true);
+        localStorage.setItem("wrongbook-ai-upgraded", "1");
+      })
+      .catch(() => {
+        setUpgradeProgress(-1);
+        setRestoreUpgrade(false);
+      })
+      .finally(() => setUpgradeBusy(false));
+  }, [aiReady, restoreUpgrade]);
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -292,6 +320,10 @@ export default function Home() {
       setAiLoadError("");
       setAiWasCleared(true);
       localStorage.setItem("wrongbook-ai-cleared", "1");
+      localStorage.removeItem("wrongbook-ai-installed");
+      localStorage.removeItem("wrongbook-ai-upgraded");
+      setRestoreUpgrade(false);
+      upgradeRestoreStartedRef.current = false;
       setAiProgress(0);
       setUpgradeProgress(0);
       setAiUpgraded(false);
@@ -311,6 +343,7 @@ export default function Home() {
       await upgradeLocalAI();
       setUpgradeProgress(100);
       setAiUpgraded(true);
+      localStorage.setItem("wrongbook-ai-upgraded", "1");
       notify("已升级，之前的对话已保留。");
     } catch {
       setUpgradeProgress(-1);
@@ -384,6 +417,7 @@ export default function Home() {
         setPhotoFeedback(`正在准备离线 AI… ${Math.round(report.progress * 100)}%`);
       });
       setAiReady(true);
+      localStorage.setItem("wrongbook-ai-installed", "1");
       const raw = await askLocalAI(buildQuestionAutofillPrompt({ ...recognizedDraft, recognizedText }), aiHistory, { raw: true });
       const filled = parseQuestionAutofill(raw);
       setDraft((current) => ({
