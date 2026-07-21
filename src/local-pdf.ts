@@ -1,4 +1,4 @@
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { recognizeWrongQuestionImage } from "./local-ocr";
 
 export const MAX_PDF_INPUT_BYTES = 20 * 1024 * 1024;
@@ -7,14 +7,24 @@ const MAX_OCR_PAGES = 5;
 
 export type PDFProgress = { progress: number; text: string };
 
+function readFileAsArrayBuffer(file: File) {
+  if (typeof file.arrayBuffer === "function") return file.arrayBuffer();
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error ?? new Error("PDF 文件读取失败。"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 export async function extractWrongQuestionPDF(file: File, onProgress?: (report: PDFProgress) => void) {
   if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) throw new Error("请选择 PDF 文件。");
   if (file.size > MAX_PDF_INPUT_BYTES) throw new Error("PDF 超过 20MB，请先压缩或拆分后再上传。");
 
   onProgress?.({ progress: 0.03, text: "正在打开 PDF…" });
-  const pdfjs = await import("pdfjs-dist");
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await readFileAsArrayBuffer(file)) });
 
   try {
     const pdf = await loadingTask.promise;
@@ -31,7 +41,7 @@ export async function extractWrongQuestionPDF(file: File, onProgress?: (report: 
 
     const embeddedText = textPages.join("\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
     if (embeddedText.length >= 20) {
-      await loadingTask.destroy();
+      await loadingTask.destroy?.();
       onProgress?.({ progress: 1, text: "PDF 文字读取完成" });
       return embeddedText.slice(0, 12000);
     }
@@ -55,13 +65,13 @@ export async function extractWrongQuestionPDF(file: File, onProgress?: (report: 
       ocrPages.push(pageText);
       page.cleanup();
     }
-    await loadingTask.destroy();
+    await loadingTask.destroy?.();
     const scannedText = ocrPages.join("\n").trim();
     if (!scannedText) throw new Error("PDF 中没有识别到题目文字。");
     onProgress?.({ progress: 1, text: "扫描版 PDF 识别完成" });
     return scannedText.slice(0, 12000);
   } catch (error) {
-    await loadingTask.destroy();
+    await loadingTask.destroy?.();
     const message = error instanceof Error ? error.message : "PDF 读取失败";
     if (/password/i.test(message)) throw new Error("暂不支持加密 PDF，请解除密码后重试。");
     throw error;
