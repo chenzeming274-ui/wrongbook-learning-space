@@ -461,7 +461,6 @@ export default function Home() {
       setPhotoFeedback(error instanceof Error ? `${error.message} 已保留已有内容。` : "PDF 识别失败，已保留已有内容。");
     } finally {
       setPhotoBusy(false);
-      if (pdfInputRef.current) pdfInputRef.current.value = "";
     }
   }
 

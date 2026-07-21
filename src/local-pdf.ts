@@ -1,4 +1,4 @@
-import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
 import { recognizeWrongQuestionImage } from "./local-ocr";
 
 export const MAX_PDF_INPUT_BYTES = 20 * 1024 * 1024;
@@ -22,7 +22,7 @@ export async function extractWrongQuestionPDF(file: File, onProgress?: (report: 
   if (file.size > MAX_PDF_INPUT_BYTES) throw new Error("PDF 超过 20MB，请先压缩或拆分后再上传。");
 
   onProgress?.({ progress: 0.03, text: "正在打开 PDF…" });
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.js");
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await readFileAsArrayBuffer(file)) });
 
@@ -56,7 +56,7 @@ export async function extractWrongQuestionPDF(file: File, onProgress?: (report: 
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext("2d");
       if (!context) throw new Error("当前浏览器无法读取扫描版 PDF。");
-      await page.render({ canvas, canvasContext: context, viewport }).promise;
+      await page.render({ canvasContext: context, viewport }).promise;
       const pageImage = canvas.toDataURL("image/jpeg", 0.86);
       const pageText = await recognizeWrongQuestionImage(pageImage, (report) => {
         const pageBase = (pageNumber - 1) / ocrPageCount;
